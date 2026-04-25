@@ -1,0 +1,13 @@
+name: downloads-organizer
+version: "0.1"
+description: An agent that organizes files in ~/Downloads into appropriate subdirectories
+entrypoint: agent.md
+permissions:
+  - FilesList
+  - FilesRead
+  - FilesMove
+  - ReceiptCreate
+memory:
+  type: local
+  scope: agent
+model_policy: default

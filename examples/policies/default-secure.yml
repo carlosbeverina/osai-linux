@@ -1,0 +1,24 @@
+# OSAI Default Secure Policy
+# This policy balances usability with security by:
+# - Allowing safe, read-only actions (ModelChat, DesktopNotify, etc.)
+# - Requiring approval for file modifications and shell commands
+# - Blocking network access without sandbox for shell commands
+# - Blocking all custom actions by default
+
+default_mode: Ask
+action_modes:
+  ModelChat: Allow
+  DesktopNotify: Allow
+  MemoryRead: Allow
+  FilesList: Allow
+  FilesRead: Allow
+  MemoryWrite: Ask
+  FilesWrite: Ask
+  FilesMove: Ask
+  FilesDelete: Ask
+  ShellRunSandboxed: Ask
+  BrowserOpenUrl: Ask
+  Custom: Deny
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true

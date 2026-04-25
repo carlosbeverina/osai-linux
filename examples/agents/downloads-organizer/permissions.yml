@@ -1,0 +1,37 @@
+# Permissions for Downloads Organizer Agent
+#
+# This agent is allowed to:
+# - List and read files in ~/Downloads (read-only, no approval needed)
+# - Move files within ~/Downloads to subdirectories (requires approval)
+# - Create receipts for audit logging (no approval needed)
+#
+# This agent is denied:
+# - Any shell execution
+# - Any network access
+# - Access to any directory outside ~/Downloads
+# - File deletion or creation outside of move operations
+
+allowed_actions:
+  - FilesList
+  - FilesRead
+  - ReceiptCreate
+
+require_approval:
+  - FilesMove
+
+denied_actions:
+  - ShellRunSandboxed
+  - BrowserOpenUrl
+  - FilesDelete
+  - FilesWrite
+
+allowed_paths:
+  - /home/*/Downloads
+  - /home/*/Pictures
+  - /home/*/Documents
+
+denied_paths:
+  - /home/*/.ssh
+  - /home/*/.config
+  - /etc
+  - /var

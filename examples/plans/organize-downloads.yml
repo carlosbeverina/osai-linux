@@ -1,0 +1,51 @@
+version: "0.1"
+id: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+title: "Organize Downloads folder"
+description: "List files in ~/Downloads and organize them by moving to appropriate subdirectories"
+actor: "user"
+risk: Medium
+approval: Ask
+steps:
+  - id: "step-1"
+    action:
+      type: FilesList
+    description: "List all files in Downloads folder"
+    requires_approval: false
+    inputs:
+      path: "/home/user/Downloads"
+  - id: "step-2"
+    action:
+      type: FilesMove
+    description: "Move image files to Pictures subdirectory"
+    requires_approval: true
+    inputs:
+      source: "/home/user/Downloads/image.png"
+      destination: "/home/user/Pictures/image.png"
+  - id: "step-3"
+    action:
+      type: FilesMove
+    description: "Move document files to Documents subdirectory"
+    requires_approval: true
+    inputs:
+      source: "/home/user/Downloads/document.pdf"
+      destination: "/home/user/Documents/document.pdf"
+  - id: "step-4"
+    action:
+      type: ReceiptCreate
+    description: "Log the organization action"
+    requires_approval: false
+    inputs:
+      action: "organize-downloads"
+      files_processed: 2
+rollback:
+  available: true
+  steps:
+    - id: "rollback-1"
+      action:
+        type: FilesMove
+      description: "Move files back to Downloads"
+      requires_approval: true
+      inputs:
+        source: "/home/user/Pictures/image.png"
+        destination: "/home/user/Downloads/image.png"
+metadata: {}
