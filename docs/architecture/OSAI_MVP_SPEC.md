@@ -1,0 +1,508 @@
+# OSAI MVP Specification v0.1
+
+> **Status**: Active Development
+> **Last Updated**: 2026-04-25
+
+## 1. Project Definition
+
+OSAI is an AI-native Linux distribution where:
+
+- **Agents are first-class applications** - Agents are installed, managed, and run like system services with explicit permissions and memory scopes
+- **Natural language becomes a programmable interface** - Users interact with agents through typed intents that are parsed, planned, and executed safely
+- **Every AI action is mediated through typed tools** - No direct model-to-shell execution; all actions flow through ToolBroker with explicit authorization
+- **Every action produces auditable receipts** - Complete audit trail of what was authorized, what executed, and what the model saw
+
+The safety model ensures that even a compromised or misbehaving model cannot directly execute destructive commands without explicit user approval and validation against policy.
+
+## 2. Current Architecture
+
+### 2.1 Execution Flow
+
+```
+User
+  │
+  ▼
+osai-agent CLI / Future UI
+  │
+  ▼
+OSAI Plan DSL (validated)
+  │
+  ▼
+ToolBroker (authorized)
+  │
+  ├──▶ ToolExecutor ──▶ Receipt Logger
+  │                     (safe actions only)
+  │
+  └──▶ Model Router ──▶ MiniMax/Gemma (when needed)
+         │
+         ▼
+       Receipt Logger
+```
+
+### 2.2 Future Path to Production
+
+```
+OpenClaw Bridge          # Protocol gateway for agent communication
+Voice Daemon             # Push-to-talk voice intent
+OSAI Command Bar          # Core UI for agent interaction
+        │
+        ▼
+Fedora Atomic / Universal Blue / BlueBuild
+        │
+        ▼
+    ISO Image + Installer
+```
+
+## 3. Implemented Components
+
+### 3.1 osai-plan-dsl
+
+**Purpose**: Safe, typed intermediate representation between natural language and system actions.
+
+**Current Capabilities**:
+- Parse and validate Plan YAML/JSON files
+- Define steps with typed actions (FilesList, FilesMove, ShellRunSandboxed, etc.)
+- Specify approval requirements per step
+- Risk levels (Low, Medium, High, Critical)
+- Rollback step definitions
+
+**Current Limitations**:
+- Schema is fixed;extensibility not yet implemented
+- No sub-plans or reusable plan libraries
+- Validation errors could be more descriptive
+
+### 3.2 osai-receipt-logger
+
+**Purpose**: Immutable audit trail for every authorization decision and execution result.
+
+**Current Capabilities**:
+- Store receipts as JSON files with UUID naming
+- Link receipts to plan ID and step ID
+- Record authorization decisions with reason
+- Record execution results with error details
+- List and retrieve receipts by UUID
+
+**Current Limitations**:
+- No receipt compaction or rotation
+- No centralized receipt database
+- No receipt aggregation for analytics
+
+### 3.3 osai-toolbroker
+
+**Purpose**: Policy-based authorization gate between plans and execution.
+
+**Current Capabilities**:
+- Load policy from YAML (default_mode, action_modes, allowed_roots)
+- Authorize ToolRequests against policy
+- Deny actions that violate shell_network_allowed or shell_requires_sandbox
+- Require user approval for configured actions
+- Create authorization receipts
+
+**Current Limitations**:
+- Policy is static (loaded from file at startup)
+- No policy hot-reload
+- No policy versioning
+- Limited deny reason granularity
+
+### 3.4 osai-tool-executor
+
+**Purpose**: Execute authorized actions safely with receipt generation.
+
+**Current Capabilities**:
+- Execute FilesList (constrained to allowed_root)
+- Execute DesktopNotify (mock/simulated)
+- Execute ModelChat (local Model Router or simulated)
+- Refuse destructive actions (FilesWrite, FilesMove, FilesDelete)
+- Refuse unsafe shell commands
+- Generate execution receipts
+
+**Current Limitations**:
+- Only 3 actions actually execute (FilesList, DesktopNotify, ModelChat)
+- No real filesystem mutations
+- No shell command execution
+- No browser automation
+- ModelChat is simulated without Model Router
+
+### 3.5 osai-agent-cli
+
+**Purpose**: Command-line interface for working with OSAI plans, policies, and tools.
+
+**Current Commands**:
+- `plan validate` - Validate plan YAML/JSON
+- `plan print` - Print plan in JSON or YAML format
+- `policy validate` - Validate policy YAML
+- `receipt list` - List receipts in directory
+- `receipt show` - Show specific receipt
+- `init` - Initialize new agent directory
+- `tool authorize` - Authorize plan against policy (no execution)
+- `tool run` - Authorize and execute plan
+- `doctor` - Run diagnostic checks
+
+**Current Limitations**:
+- No interactive approval workflow
+- No plan step debugging
+- No diff between plan versions
+
+### 3.6 services/model-router
+
+**Purpose**: Local service that routes model requests to appropriate providers (local Gemma or cloud MiniMax).
+
+**Current Capabilities**:
+- OpenAI-compatible `/v1/chat/completions` endpoint
+- `/health` health check endpoint
+- `/v1/models` listing endpoint
+- Auto-routing based on `metadata` hints (privacy, complexity, speed)
+- Mock mode for cloud providers (default)
+- Thinking block stripping
+- Loopback-only binding (127.0.0.1)
+
+**Current Limitations**:
+- No real MiniMax integration (mock mode only)
+- No Ollama integration
+- No model weight management
+- No model download/pulling
+- No streaming responses
+- Single-user only
+
+### 3.7 scripts/osai-dev-*
+
+**Purpose**: Developer convenience scripts for local development.
+
+**Current Scripts**:
+- `osai-dev-env` - Source to set environment variables (safe defaults, mock mode)
+- `osai-dev-up` - Start Model Router in foreground
+- `osai-dev-check` - Check Model Router health and functionality
+- `osai-dev-down` - Stop systemd user service
+- `osai-install-user-services` - Install systemd user units
+
+### 3.8 systemd/user/osai-model-router.service
+
+**Purpose**: Persistent background service for Model Router.
+
+**Current Configuration**:
+- Runs as user systemd service
+- EnvironmentFile: `~/.config/osai/model-router.env` (optional)
+- Default mock mode: `OSAI_MODEL_ROUTER_MOCK_CLOUD=true`
+- Default receipts dir: `~/.local/share/osai/receipts/model-router`
+- Binds to 127.0.0.1:8088
+- Restart on failure
+
+## 4. Current CLI Commands
+
+### Plan Commands
+
+```bash
+osai-agent plan validate <path>
+osai-agent plan print <path> --format json|yaml
+```
+
+### Policy Commands
+
+```bash
+osai-agent policy validate <path>
+```
+
+### Receipt Commands
+
+```bash
+osai-agent receipt list <root_dir>
+osai-agent receipt show <root_dir> <uuid>
+```
+
+### Init Command
+
+```bash
+osai-agent init <directory>
+```
+
+### Tool Commands
+
+```bash
+osai-agent tool authorize --plan <path> --policy <path> --receipts-dir <path>
+osai-agent tool run --plan <path> --policy <path> --receipts-dir <path> --allowed-root <path>... [--approve <step_id>] [--approve-all] [--model-router-url <url>]
+```
+
+### Doctor Command
+
+```bash
+osai-agent doctor [--repo-root <path>] [--model-router-url <url>] [--receipts-dir <path>] [--skip-model-router] [--json]
+```
+
+## 5. Security Model v0.1
+
+### 5.1 Core Principles
+
+1. **No Direct Model-to-Shell**: Models never execute shell commands directly. All execution flows through ToolBroker authorization.
+
+2. **Plans Must Validate**: Invalid plans cannot be executed. Validation catches schema errors and safety violations before any execution attempt.
+
+3. **ToolBroker Authorizes**: Every action is checked against policy before execution. Policy enforces:
+   - `shell_network_allowed`: Whether unsandboxed network access is permitted
+   - `shell_requires_sandbox`: Whether shell commands must be sandboxed
+   - `allowed_roots`: Which directories FilesList can access
+
+4. **ToolExecutor Executes Only Safe Subset**: Even authorized actions are filtered:
+   - FilesWrite, FilesMove, FilesDelete are refused in v0.1
+   - ShellRunSandboxed is refused in v0.1
+   - BrowserOpenUrl is refused in v0.1
+
+5. **Destructive Actions Require Approval**: Actions in `require_approval` list need explicit `--approve` or `--approve-all`.
+
+6. **Approval Does Not Bypass Executor Safety**: Approval only bypasses the "requires user approval" check. ToolExecutor still refuses unsupported actions even with approval.
+
+7. **Receipts Are Written**: Every authorization decision and execution result is recorded.
+
+8. **Prompts and Secrets Should Not Be Logged**: Full prompts are not stored in receipts; only message counts and roles.
+
+9. **Model Router Only Binds to 127.0.0.1**: External network exposure is prevented at the socket level.
+
+10. **MiniMax Mock Mode is Default**: Development uses simulated cloud responses to prevent accidental spend.
+
+### 5.2 Authorization Flow
+
+```
+Plan Step
+    │
+    ▼
+┌─────────────────┐
+│   Validate      │ ─── Invalid? ──▶ REJECT
+└─────────────────┘
+    │
+    ▼
+┌─────────────────┐
+│  ToolBroker     │
+│  authorize()    │ ─── Denied? ──▶ REJECT + receipt
+└─────────────────┘
+    │
+    ▼
+┌─────────────────┐
+│  requires_      │
+│  approval?      │ ─── Yes + not approved? ──▶ SKIP + receipt
+└─────────────────┘
+    │
+    ▼
+┌─────────────────┐
+│ ToolExecutor    │
+│ execute()       │ ─── Unsupported? ──▶ FAIL + receipt
+└─────────────────┘
+    │
+    ▼
+ SUCCESS + receipt
+```
+
+## 6. Receipts Model
+
+### 6.1 Receipt Types
+
+| Receipt Type | Created By | Contents |
+|--------------|------------|---------|
+| Authorization | ToolBroker | request_id, action, decision, reason, policy_mode |
+| Execution | ToolExecutor | request_id, status, error, duration_ms |
+| Model | Model Router | request_id, provider, model, tokens_used, duration_ms |
+
+### 6.2 Redaction Policy
+
+**Stored (for authorization/execution)**:
+- Plan ID, step ID
+- Action type
+- Decision (allowed/denied)
+- Policy mode
+- Risk level
+- Timestamp
+
+**NOT Stored**:
+- Full prompts or messages (only counts)
+- File paths or contents
+- Error details that may contain sensitive data
+- API keys or tokens
+
+**ModelChat Special Handling**:
+```rust
+// Only these fields are stored:
+message_count: usize,
+roles: Vec<String>,  // ["user", "assistant"]
+// NOT: prompt content, messages, responses
+```
+
+### 6.3 Receipt Naming
+
+```
+{uuid}.json
+```
+
+UUIDs are V4 random, providing uniqueness without predictability.
+
+## 7. Model Strategy
+
+### 7.1 Local Model Strategy
+
+**Default Local**: Gemma 4 E4B
+- Used for: Most agent interactions
+- Binding: Via local Model Router to Ollama (future) or direct API
+
+**Background Local**: Gemma 4 E2B
+- Used for: Lightweight background tasks
+- Characteristics: Faster, lower resource usage
+
+**Performance Local**: Gemma 4 26B
+- Used for: Complex reasoning tasks
+- Activation: Only when plugged in or explicitly requested
+
+### 7.2 Cloud Model Strategy
+
+**Default Cloud**: MiniMax-M2.7
+- Used for: Tasks requiring higher capability
+- Routing: Via Model Router with `osai-cloud` model name
+
+**Fast Cloud**: MiniMax-M2.7-highspeed
+- Used for: Low-latency requirements
+
+**Mock Mode (Development)**:
+- All cloud calls return simulated responses
+- No actual API spend
+- Enabled by `OSAI_MODEL_ROUTER_MOCK_CLOUD=true`
+
+### 7.3 Auto-Routing
+
+The `osai-auto` model routes based on metadata hints:
+
+| Metadata | Routing |
+|----------|---------|
+| `privacy: "local_only"` | Always use local |
+| `complexity: "high"` | Use larger local or cloud |
+| `speed: "fast"` | Prefer fast models |
+| (none) | Default local |
+
+### 7.4 ModelChat Execution Path
+
+```
+Plan: ModelChat step
+    │
+    ▼
+ToolExecutor
+    │
+    ├── No Model Router URL? ──▶ Return simulated response
+    │
+    └── Model Router URL set ──▶ POST /v1/chat/completions
+                                      │
+                                      ▼
+                               Model Router
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    │                               │
+            osai-auto routing              Direct model (osai-local, etc.)
+                    │                               │
+                    ▼                               ▼
+            Check metadata hints              Route to appropriate provider
+                    │                               │
+                    └───────────────┬───────────────┘
+                                    ▼
+                            Gemma or MiniMax
+                                    │
+                                    ▼
+                            Receipt (redacted)
+```
+
+### 7.5 No Direct MiniMax Calls
+
+Agents and tools never call MiniMax directly. All model traffic flows through Model Router, which:
+- Enforces mock mode when configured
+- Provides audit trail
+- Abstracts provider details
+
+## 8. Development Workflow
+
+### 8.1 Starting Model Router
+
+```bash
+# Option 1: Foreground (for development)
+./scripts/osai-dev-up
+
+# Option 2: Background service
+./scripts/osai-install-user-services
+systemctl --user enable --now osai-model-router.service
+```
+
+### 8.2 Checking Health
+
+```bash
+./scripts/osai-dev-check
+```
+
+This checks:
+- `/health` endpoint
+- `/v1/models` endpoint
+- `/v1/chat/completions` with a test request
+
+### 8.3 Stopping Services
+
+```bash
+./scripts/osai-dev-down
+```
+
+### 8.4 Running Tests
+
+```bash
+# Rust tests
+cargo test
+
+# Python tests (Model Router)
+cd services/model-router && pytest tests/
+```
+
+### 8.5 Diagnostic Checks
+
+```bash
+# Full diagnostic (skips Model Router)
+cargo run -p osai-agent-cli -- doctor --skip-model-router
+
+# With Model Router checks
+cargo run -p osai-agent-cli -- doctor
+
+# JSON output for automation
+cargo run -p osai-agent-cli -- doctor --json --skip-model-router
+```
+
+## 9. MVP Milestones
+
+| Milestone | Status | Description |
+|-----------|--------|-------------|
+| M1 Core Safety Runtime | **COMPLETED** | Plan DSL, ToolBroker, ToolExecutor, Receipt Logger |
+| M2 Model Router Integration | **COMPLETED** | Model Router service with mock mode, CLI integration |
+| M3 Service Orchestration | **COMPLETED** | Dev scripts, systemd units, doctor command |
+| M4 OpenClaw Bridge | NEXT | Protocol gateway for external agent communication |
+| M5 OSAI Command Bar UI | PLANNED | Core Tauri/TypeScript UI for agent interaction |
+| M6 Voice Daemon | PLANNED | Push-to-talk voice intent capture |
+| M7 Agent App SDK and Manifests | PLANNED | Agent installation, permissions, manifest schema |
+| M8 Fedora/Universal Blue Image | PLANNED | Base OSAI image with atomic updates |
+| M9 VM Test Image | PLANNED | Pre-built VM for testing without installation |
+| M10 Installer / Dual Boot | PLANNED | User-friendly installation with Windows dual boot |
+
+## 10. Non-Goals for Now
+
+The following are explicitly **NOT** in scope for MVP v0.1:
+
+- **No kernel modification** - OSAI runs on standard Fedora atomic
+- **No direct shell execution** - All execution via ToolBroker authorization
+- **No filesystem mutation until approval/rollback is stronger** - v0.1 ToolExecutor refuses FilesWrite, FilesMove, FilesDelete
+- **No always-listening microphone** - Voice is push-to-talk only
+- **No real agent marketplace** - Just manifests and directories
+- **No distro installer yet** - Coming in M10
+
+## 11. Open Questions
+
+These items need further design before implementation:
+
+1. **OpenClaw Gateway Protocol** - Exact wire format for agent communication?
+2. **GNOME vs Tauri First UI** - Which platform to prioritize for Command Bar?
+3. **Ollama/Gemma Integration** - Direct Ollama API or Model Router as Ollama wrapper?
+4. **Local Model Management** - How to download, update, and select local models?
+5. **Memory Manager Design** - Scope, persistence, and access control for agent memory?
+6. **Rollback for File Mutations** - Atomic transactions or copy-on-write backup?
+7. **Policy UI** - How should users view and edit policies visually?
+
+## 12. Related Documentation
+
+- [OSAI Agent CLI](../crates/osai-agent-cli/README.md) - CLI usage and examples
+- [Model Router](../services/model-router/README.md) - Model Router API and configuration
+- [Plan DSL Schema](../crates/osai-plan-dsl/) - Plan file format reference

@@ -2,6 +2,12 @@
 
 OSAI is an AI-native Linux distribution where agents are first-class applications, natural language becomes a programmable interface, and every AI action is mediated through typed tools, explicit permissions, memory scopes, sandboxing, and auditable receipts.
 
+## Architecture
+
+For full system architecture and MVP specification, see:
+
+- [OSAI MVP Specification v0.1](docs/architecture/OSAI_MVP_SPEC.md)
+
 ## Initial architecture
 
 - Linux base: Fedora Atomic / Universal Blue / BlueBuild
