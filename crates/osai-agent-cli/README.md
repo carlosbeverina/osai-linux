@@ -61,7 +61,7 @@ Exit code is non-zero if any step is denied.
 
 #### Run a plan (authorize + execute)
 ```bash
-osai-agent tool run --plan <path> --policy <path> --receipts-dir <path> --allowed-root <path>...
+osai-agent tool run --plan <path> --policy <path> --receipts-dir <path> --allowed-root <path>... [--approve <step_id>] [--approve-all]
 ```
 Authorizes and executes each step in a plan against a policy, then creates audit receipts.
 
@@ -71,40 +71,86 @@ For each step, it:
 1. Converts the step into a ToolRequest
 2. Calls the ToolBroker to authorize
 3. Prints authorization decision
-4. Calls ToolExecutor to execute (if allowed and no approval required)
-5. Prints execution result
-6. Writes a receipt
+4. If approval is required but not provided: skips execution
+5. If approval is required and provided via `--approve` or `--approve-all`: passes to executor with adjusted decision
+6. Calls ToolExecutor to execute (if allowed and no approval required, or explicitly approved)
+7. Prints execution result
+8. Writes a receipt
+
+**Approval Flags:**
+- `--approve <step_id>` - Approve a specific step by its ID. Can be passed multiple times.
+- `--approve-all` - Approve all steps that require user approval.
 
 Output format per step:
 ```
 step=<step_id>
 authorization: allowed=<true|false> approval=<true|false> mode=<mode> reason="<reason>"
+[approval: source=cli step=<step_id>]
 execution: status=<Executed|Failed|Skipped> action=<action> error="<error_or_empty>"
 ```
 
-**Execution vs Authorization**: `tool authorize` only checks if actions are permitted by policy. `tool run` actually executes safe actions (FilesList, DesktopNotify, ModelChat) through ToolExecutor after authorization.
+**Important**: Approval does not mean unsafe actions execute. ToolExecutor v0.1 still refuses FilesMove, FilesWrite, FilesDelete, ShellRunSandboxed, BrowserOpenUrl, and Custom actions regardless of approval. Approval only bypasses the "requires user approval" check for actions that would otherwise be allowed by policy.
 
-Exit code is non-zero if any step is denied or execution fails.
+**Exit behavior:**
+- Unapproved skipped (approval required but not provided): exit 0
+- Approved but executor refuses (unsupported action): exit non-zero
+- Denied by policy: exit non-zero
+- Execution failed: exit non-zero
 
 **v0.1 Executable Actions**: Only FilesList, DesktopNotify, and ModelChat are executed (simulated). All other actions (FilesWrite, FilesMove, FilesDelete, ShellRunSandboxed, BrowserOpenUrl, Custom) are refused.
 
 **Path Restrictions**: FilesList is constrained to allowed_root directories.
 
-#### Run example
+#### Run examples
+
+Run without approval (steps requiring approval will be skipped):
 ```bash
 osai-agent tool run \
-  --plan examples/plans/safe-list.yml \
+  --plan examples/plans/organize-downloads.yml \
   --policy examples/policies/default-secure.yml \
   --receipts-dir /tmp/osai-receipts \
-  --allowed-root /tmp \
-  --allowed-root /home/user
+  --allowed-root ~/
 ```
 
-Sample output:
+Approve specific steps and execute:
+```bash
+osai-agent tool run \
+  --plan examples/plans/organize-downloads.yml \
+  --policy examples/policies/default-secure.yml \
+  --receipts-dir /tmp/osai-receipts \
+  --allowed-root ~/ \
+  --approve step-2
+```
+
+Approve all approval-required steps:
+```bash
+osai-agent tool run \
+  --plan examples/plans/organize-downloads.yml \
+  --policy examples/policies/default-secure.yml \
+  --receipts-dir /tmp/osai-receipts \
+  --allowed-root ~/ \
+  --approve-all
+```
+
+Sample output (without approval):
 ```
 step=step-1
 authorization: allowed=true approval=false mode=Allow reason="Action FilesList allowed by policy"
 execution: status=Executed action=FilesList error=""
+step=step-2
+authorization: allowed=true approval=true mode=Ask reason="Action FilesMove requires user approval"
+execution: status=Skipped action=FilesMove error="Execution skipped: requires user approval"
+```
+
+Sample output (with --approve step-2):
+```
+step=step-1
+authorization: allowed=true approval=false mode=Allow reason="Action FilesList allowed by policy"
+execution: status=Executed action=FilesList error=""
+step=step-2
+authorization: allowed=true approval=true mode=Ask reason="Action FilesMove requires user approval"
+approval: source=cli step=step-2
+execution: status=Failed action=FilesMove error="Action is not executable in ToolExecutor v0.1"
 ```
 
 ### Receipt Commands
