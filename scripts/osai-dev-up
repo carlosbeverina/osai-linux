@@ -1,0 +1,24 @@
+#!/bin/bash
+# Start OSAI Model Router in foreground
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/osai-dev-env"
+
+VENV_BIN="${OSAI_MODEL_ROUTER_VENV}/bin/uvicorn"
+
+if [[ ! -x "$VENV_BIN" ]]; then
+    echo "Error: uvicorn not found at ${VENV_BIN}" >&2
+    echo "" >&2
+    echo "Run the following to set up the virtual environment:" >&2
+    echo "  cd services/model-router && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'" >&2
+    exit 1
+fi
+
+cd "${REPO_ROOT}/services/model-router"
+
+echo "Starting OSAI Model Router..."
+echo "Health URL: ${OSAI_MODEL_ROUTER_URL}/health"
+echo ""
+
+exec "$VENV_BIN" osai_model_router.main:app --host "${OSAI_MODEL_ROUTER_HOST}" --port "${OSAI_MODEL_ROUTER_PORT}"

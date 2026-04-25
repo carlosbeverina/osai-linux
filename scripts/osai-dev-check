@@ -1,0 +1,75 @@
+#!/bin/bash
+# Check OSAI Model Router health and functionality
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/osai-dev-env"
+
+HEALTH_URL="${OSAI_MODEL_ROUTER_URL}/health"
+MODELS_URL="${OSAI_MODEL_ROUTER_URL}/v1/models"
+CHAT_URL="${OSAI_MODEL_ROUTER_URL}/v1/chat/completions"
+
+echo "=== OSAI Model Router Health Check ==="
+echo ""
+
+# Check /health
+echo "Checking /health..."
+HEALTH_RESPONSE=$(curl -s -f -w "\n%{http_code}" "$HEALTH_URL")
+HEALTH_CODE=$(echo "$HEALTH_RESPONSE" | tail -n1)
+HEALTH_BODY=$(echo "$HEALTH_RESPONSE" | sed '$d')
+
+if [[ "$HEALTH_CODE" -eq 200 ]]; then
+    echo "  [OK] /health returned 200"
+else
+    echo "  [FAIL] /health returned $HEALTH_CODE" >&2
+    exit 1
+fi
+
+# Check /v1/models
+echo "Checking /v1/models..."
+MODELS_RESPONSE=$(curl -s -f -w "\n%{http_code}" "$MODELS_URL")
+MODELS_CODE=$(echo "$MODELS_RESPONSE" | tail -n1)
+
+if [[ "$MODELS_CODE" -eq 200 ]]; then
+    echo "  [OK] /v1/models returned 200"
+else
+    echo "  [FAIL] /v1/models returned $MODELS_CODE" >&2
+    exit 1
+fi
+
+# Check /v1/chat/completions with a small local_only request
+echo "Checking /v1/chat/completions with local_only request..."
+
+CHAT_RESPONSE=$(curl -s -f -w "\n%{http_code}" "$CHAT_URL" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"osai-local","messages":[{"role":"user","content":"Hi"}],"metadata":{"privacy":"local_only"}}')
+CHAT_CODE=$(echo "$CHAT_RESPONSE" | tail -n1)
+CHAT_BODY=$(echo "$CHAT_RESPONSE" | sed '$d')
+
+if [[ "$CHAT_CODE" -eq 200 ]]; then
+    echo "  [OK] /v1/chat/completions returned 200"
+    # Check if response has expected fields (without jq)
+    if echo "$CHAT_BODY" | grep -q '"provider"'; then
+        echo "  [OK] Response contains provider field"
+    else
+        echo "  [WARN] Response missing provider field"
+    fi
+    if echo "$CHAT_BODY" | grep -q '"model"'; then
+        echo "  [OK] Response contains model field"
+    else
+        echo "  [WARN] Response missing model field"
+    fi
+    if echo "$CHAT_BODY" | grep -q '"content"'; then
+        echo "  [OK] Response contains content field"
+    else
+        echo "  [WARN] Response missing content field"
+    fi
+else
+    echo "  [FAIL] /v1/chat/completions returned $CHAT_CODE" >&2
+    echo "  Response: $CHAT_BODY" >&2
+    exit 1
+fi
+
+echo ""
+echo "=== All checks passed ==="
+exit 0

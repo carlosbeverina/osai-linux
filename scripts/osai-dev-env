@@ -1,0 +1,32 @@
+#!/bin/bash
+# OSAI Development Environment
+# Source this script to set up development environment variables.
+# Usage: source scripts/osai-dev-env
+
+set -euo pipefail
+
+# Resolve repo root (one level up from scripts/)
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export REPO_ROOT
+
+# Load root .env if present (but never print secrets)
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+    # Export all MINIMAX_* variables but never echo them
+    while IFS='=' read -r key value; do
+        if [[ "$key" =~ ^MINIMAX_ ]]; then
+            export "$key=$value"
+        fi
+    done < "${REPO_ROOT}/.env"
+fi
+
+# Safe defaults for development
+export OSAI_MODEL_ROUTER_MOCK_CLOUD="${OSAI_MODEL_ROUTER_MOCK_CLOUD:-true}"
+export OSAI_RECEIPTS_DIR="${OSAI_RECEIPTS_DIR:-/tmp/osai-model-router-receipts}"
+export OSAI_MODEL_ROUTER_HOST="${OSAI_MODEL_ROUTER_HOST:-127.0.0.1}"
+export OSAI_MODEL_ROUTER_PORT="${OSAI_MODEL_ROUTER_PORT:-8088}"
+
+# Derived values
+export OSAI_MODEL_ROUTER_URL="http://${OSAI_MODEL_ROUTER_HOST}:${OSAI_MODEL_ROUTER_PORT}"
+
+# Model Router venv path
+export OSAI_MODEL_ROUTER_VENV="${REPO_ROOT}/services/model-router/.venv"

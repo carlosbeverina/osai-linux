@@ -1,0 +1,24 @@
+#!/bin/bash
+# Stop OSAI Model Router
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/osai-dev-env"
+
+echo "Checking systemd user service..."
+
+if systemctl --user is-active --quiet osai-model-router.service 2>/dev/null; then
+    echo "Stopping osai-model-router.service..."
+    systemctl --user stop osai-model-router.service
+    echo "Service stopped."
+elif systemctl --user is-active --quiet osai-model-router.socket 2>/dev/null; then
+    echo "Stopping osai-model-router.socket..."
+    systemctl --user stop osai-model-router.socket osai-model-router.service 2>/dev/null || \
+        systemctl --user stop osai-model-router.socket
+    echo "Socket stopped."
+else
+    echo "Note: osai-model-router.service is not active."
+    echo "If a foreground process is running, stop it with Ctrl+C."
+fi
+
+exit 0

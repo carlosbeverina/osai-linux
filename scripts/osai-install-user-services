@@ -1,0 +1,82 @@
+#!/bin/bash
+# Install OSAI systemd user services
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+ENABLE_NOW=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --enable-now)
+            ENABLE_NOW=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--enable-now]"
+            echo ""
+            echo "Options:"
+            echo "  --enable-now  Enable and start the service immediately"
+            echo ""
+            echo "This script installs systemd user units from:"
+            echo "  ${REPO_ROOT}/systemd/user/"
+            echo "to:"
+            echo "  ~/.config/systemd/user/"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+USER_SERVICE_DIR="${HOME}/.config/systemd/user"
+SYSTEMD_SOURCE="${REPO_ROOT}/systemd/user"
+
+echo "Installing OSAI systemd user services..."
+echo ""
+
+# Create user systemd directory if it doesn't exist
+mkdir -p "$USER_SERVICE_DIR"
+
+# Copy service files
+for service_file in "${SYSTEMD_SOURCE}"/*.service; do
+    if [[ -f "$service_file" ]]; then
+        service_name=$(basename "$service_file")
+        echo "  Copying $service_name..."
+        cp "$service_file" "${USER_SERVICE_DIR}/"
+    fi
+done
+
+echo ""
+echo "Running systemctl --user daemon-reload..."
+systemctl --user daemon-reload
+
+echo ""
+echo "=== Installation complete ==="
+echo ""
+echo "Next steps:"
+echo ""
+if [[ "$ENABLE_NOW" == "true" ]]; then
+    echo "Enabling and starting osai-model-router.service..."
+    systemctl --user enable --now osai-model-router.service
+    echo ""
+    echo "Service status:"
+    systemctl --user status osai-model-router.service
+else
+    echo "To start osai-model-router.service manually:"
+    echo "  systemctl --user start osai-model-router.service"
+    echo ""
+    echo "To enable at login:"
+    echo "  systemctl --user enable osai-model-router.service"
+    echo ""
+    echo "To check status:"
+    echo "  systemctl --user status osai-model-router.service"
+    echo ""
+    echo "To view logs:"
+    echo "  journalctl --user -u osai-model-router -f"
+fi
+
+exit 0

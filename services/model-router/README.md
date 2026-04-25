@@ -142,6 +142,39 @@ uvicorn osai_model_router.main:app --host 127.0.0.1 --port 8088
 python -m osai_model_router.main
 ```
 
+### Development Scripts
+
+For convenience, use the OSAI development scripts:
+
+```bash
+# Start Model Router in foreground
+./scripts/osai-dev-up
+
+# Check health and functionality
+./scripts/osai-dev-check
+
+# Stop the service
+./scripts/osai-dev-down
+```
+
+### Systemd User Service
+
+For a persistent background service:
+
+```bash
+# Install systemd user units
+./scripts/osai-install-user-services
+
+# Enable and start at login
+systemctl --user enable --now osai-model-router.service
+
+# Check status
+systemctl --user status osai-model-router.service
+
+# View logs
+journalctl --user -u osai-model-router -f
+```
+
 ### Test
 
 ```bash
