@@ -12,23 +12,23 @@ steps:
     description: "List all files in Downloads folder"
     requires_approval: false
     inputs:
-      path: "/home/user/Downloads"
+      path: "~/Downloads"
   - id: "step-2"
     action:
       type: FilesMove
     description: "Move image files to Pictures subdirectory"
     requires_approval: true
     inputs:
-      source: "/home/user/Downloads/image.png"
-      destination: "/home/user/Pictures/image.png"
+      source: "~/Downloads/image.png"
+      destination: "~/Pictures/image.png"
   - id: "step-3"
     action:
       type: FilesMove
     description: "Move document files to Documents subdirectory"
     requires_approval: true
     inputs:
-      source: "/home/user/Downloads/document.pdf"
-      destination: "/home/user/Documents/document.pdf"
+      source: "~/Downloads/document.pdf"
+      destination: "~/Documents/document.pdf"
   - id: "step-4"
     action:
       type: ReceiptCreate
@@ -46,6 +46,6 @@ rollback:
       description: "Move files back to Downloads"
       requires_approval: true
       inputs:
-        source: "/home/user/Pictures/image.png"
-        destination: "/home/user/Downloads/image.png"
+        source: "~/Pictures/image.png"
+        destination: "~/Downloads/image.png"
 metadata: {}
