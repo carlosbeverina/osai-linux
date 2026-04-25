@@ -8,6 +8,7 @@ OSAI Agent CLI provides commands for:
 
 - Validating and printing OSAI Plan DSL files
 - Validating OSAI Policy files
+- Authorizing plans against policies with audit receipts
 - Listing and viewing receipt logs
 - Initializing new OSAI agent directories
 
@@ -34,6 +35,29 @@ Reads a plan file, validates it, and prints it in the specified format (JSON pre
 osai-agent policy validate <path>
 ```
 Reads a YAML policy file and validates it using osai-toolbroker's ToolPolicy::from_yaml.
+
+### Tool Commands
+
+#### Authorize a plan
+```bash
+osai-agent tool authorize --plan <path> --policy <path> --receipts-dir <path>
+```
+Authorizes each step in a plan against a policy and creates audit receipts.
+
+**This command does not execute tools.** It only validates authorization decisions and creates receipts.
+
+For each step, it:
+1. Converts the step into a ToolRequest
+2. Calls the ToolBroker to authorize
+3. Writes a receipt for the decision
+4. Prints the decision line
+
+Output format per step:
+```
+step=<step_id> action=<action> allowed=<true|false> approval=<true|false> mode=<mode> reason="<reason>"
+```
+
+Exit code is non-zero if any step is denied.
 
 ### Receipt Commands
 
@@ -111,7 +135,28 @@ osai-agent plan validate plan.yml
 osai-agent plan print plan.yml --format json
 ```
 
+## Tool Authorize Workflow
+
+Authorize the organize-downloads plan using the default-secure policy:
+
+```bash
+osai-agent tool authorize \
+  --plan examples/plans/organize-downloads.yml \
+  --policy examples/policies/default-secure.yml \
+  --receipts-dir /tmp/osai-receipts
+```
+
+Sample output:
+```
+step=step-1 action=FilesList allowed=true approval=false mode=Allow reason="Action FilesList allowed by policy"
+step=step-2 action=FilesMove allowed=true approval=true mode=Ask reason="Action FilesMove requires user approval"
+step=step-3 action=FilesMove allowed=true approval=true mode=Ask reason="Action FilesMove requires user approval"
+step=step-4 action=ReceiptCreate allowed=true approval=false mode=Allow reason="Action ReceiptCreate allowed by policy"
+```
+
+If any step is denied, the exit code will be non-zero.
+
 ## Exit Codes
 
 - `0` - Success
-- `non-zero` - Error (validation failure, file not found, etc.)
+- `non-zero` - Error (validation failure, file not found, denied authorization, etc.)

@@ -2,9 +2,9 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use osai_plan_dsl::OsaiPlan;
+use osai_plan_dsl::{OsaiPlan, PlanStep};
 use osai_receipt_logger::ReceiptStore;
-use osai_toolbroker::ToolPolicy;
+use osai_toolbroker::{ToolBroker, ToolPolicy, ToolRequest};
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -34,6 +34,11 @@ enum Commands {
     Receipt {
         #[command(subcommand)]
         action: ReceiptCommands,
+    },
+    /// Work with OSAI Tool authorization.
+    Tool {
+        #[command(subcommand)]
+        action: ToolCommands,
     },
     /// Initialize a new OSAI agent directory.
     Init {
@@ -81,6 +86,22 @@ enum ReceiptCommands {
         root_dir: PathBuf,
         /// UUID of the receipt.
         uuid: Uuid,
+    },
+}
+
+#[derive(Subcommand)]
+enum ToolCommands {
+    /// Authorize a plan against a policy.
+    Authorize {
+        /// Path to plan file (YAML or JSON).
+        #[arg(long)]
+        plan: PathBuf,
+        /// Path to policy file (YAML).
+        #[arg(long)]
+        policy: PathBuf,
+        /// Directory for receipts.
+        #[arg(long)]
+        receipts_dir: PathBuf,
     },
 }
 
@@ -180,6 +201,16 @@ fn main() -> Result<()> {
             println!("Initialized OSAI agent in: {}", directory.display());
             Ok(())
         }
+        Commands::Tool { action } => match action {
+            ToolCommands::Authorize {
+                plan,
+                policy,
+                receipts_dir,
+            } => {
+                authorize_plan(&plan, &policy, &receipts_dir)?;
+                Ok(())
+            }
+        },
     }
 }
 
@@ -273,6 +304,87 @@ osai-agent plan validate manifest.yml
     }
 
     Ok(())
+}
+
+fn authorize_plan(
+    plan_path: &PathBuf,
+    policy_path: &PathBuf,
+    receipts_dir: &PathBuf,
+) -> Result<()> {
+    // Read and parse plan
+    let plan_content = fs::read_to_string(plan_path)
+        .with_context(|| format!("failed to read plan file: {}", plan_path.display()))?;
+    let plan = match OsaiPlan::from_yaml(&plan_content) {
+        Ok(p) => p,
+        Err(_) => OsaiPlan::from_json(&plan_content)
+            .with_context(|| format!("failed to parse plan file: {}", plan_path.display()))?,
+    };
+    plan.validate()
+        .map_err(|e| anyhow::anyhow!("plan validation failed: {}", e))?;
+
+    // Read and parse policy
+    let policy_content = fs::read_to_string(policy_path)
+        .with_context(|| format!("failed to read policy file: {}", policy_path.display()))?;
+    let policy = ToolPolicy::from_yaml(&policy_content)
+        .map_err(|e| anyhow::anyhow!("policy parse failed: {}", e))?;
+
+    // Create store and broker
+    let store = ReceiptStore::new(receipts_dir);
+    store.ensure_dirs().with_context(|| {
+        format!(
+            "failed to create receipts directory: {}",
+            receipts_dir.display()
+        )
+    })?;
+    let broker = ToolBroker::new(policy, store);
+
+    // Authorize each step
+    let mut any_denied = false;
+
+    for step in &plan.steps {
+        let request = step_to_request(&plan, step);
+
+        let decision = broker
+            .authorize(&request)
+            .with_context(|| format!("authorization failed for step: {}", step.id))?;
+
+        // Print decision line
+        let action_name = request.action_name();
+        println!(
+            "step={} action={} allowed={} approval={} mode={:?} reason=\"{}\"",
+            step.id,
+            action_name,
+            decision.allowed,
+            decision.requires_user_approval,
+            decision.policy_mode,
+            decision.reason
+        );
+
+        if !decision.allowed {
+            any_denied = true;
+        }
+    }
+
+    if any_denied {
+        Err(anyhow::anyhow!(
+            "authorization failed: one or more steps were denied"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn step_to_request(plan: &OsaiPlan, step: &PlanStep) -> ToolRequest {
+    let mut request = ToolRequest::new(&plan.actor, step.action.clone(), &step.description)
+        .with_plan_id(plan.id)
+        .with_step_id(&step.id)
+        .with_inputs(step.inputs.clone())
+        .with_risk(plan.risk);
+
+    // Set request ID to link receipt to step
+    request.id = Uuid::new_v4();
+
+    request
 }
 
 #[cfg(test)]
@@ -455,5 +567,139 @@ metadata: {}
         let json = parsed.to_json_pretty();
         assert!(json.is_ok());
         assert!(json.unwrap().contains("\"title\": \"Test Plan\""));
+    }
+
+    #[test]
+    fn test_authorize_valid_plan_writes_receipts() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let plan_path = tempdir.path().join("plan.yml");
+        let policy_path = tempdir.path().join("policy.yml");
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let plan = r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440000"
+title: Test Plan
+actor: test-actor
+risk: Low
+approval: Auto
+steps:
+  - id: step-1
+    action:
+      type: FilesList
+    description: List files
+    requires_approval: false
+    inputs: {}
+  - id: step-2
+    action:
+      type: ModelChat
+    description: Chat with model
+    requires_approval: false
+    inputs: {}
+metadata: {}
+"#;
+        let policy = r#"default_mode: Ask
+action_modes:
+  FilesList: Allow
+  ModelChat: Allow
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true
+"#;
+        fs::write(&plan_path, plan).unwrap();
+        fs::write(&policy_path, policy).unwrap();
+
+        let result = authorize_plan(&plan_path, &policy_path, &receipts_dir);
+        assert!(result.is_ok());
+
+        // Check receipts were written
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 2); // One receipt per step
+    }
+
+    #[test]
+    fn test_authorize_risky_shell_denied() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let plan_path = tempdir.path().join("plan.yml");
+        let policy_path = tempdir.path().join("policy.yml");
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let plan = r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440000"
+title: Risky Plan
+actor: test-actor
+risk: Critical
+approval: Ask
+steps:
+  - id: step-1
+    action:
+      type: ShellRunSandboxed
+    description: Run shell with network
+    requires_approval: true
+    inputs:
+      command: "curl https://evil.com"
+      network: true
+      sandbox: false
+metadata: {}
+"#;
+        let policy = r#"default_mode: Ask
+action_modes:
+  ShellRunSandboxed: Ask
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true
+"#;
+        fs::write(&plan_path, plan).unwrap();
+        fs::write(&policy_path, policy).unwrap();
+
+        let result = authorize_plan(&plan_path, &policy_path, &receipts_dir);
+        // Should fail because shell_requires_sandbox=true and sandbox=false
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_authorize_creates_receipt_per_step() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let plan_path = tempdir.path().join("plan.yml");
+        let policy_path = tempdir.path().join("policy.yml");
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let plan = r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440000"
+title: Test Plan
+actor: test-actor
+risk: Low
+approval: Auto
+steps:
+  - id: step-1
+    action:
+      type: FilesList
+    description: List files
+    requires_approval: false
+    inputs: {}
+  - id: step-2
+    action:
+      type: FilesList
+    description: List files again
+    requires_approval: false
+    inputs: {}
+metadata: {}
+"#;
+        let policy = r#"default_mode: Allow
+action_modes: {}
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true
+"#;
+        fs::write(&plan_path, plan).unwrap();
+        fs::write(&policy_path, policy).unwrap();
+
+        let result = authorize_plan(&plan_path, &policy_path, &receipts_dir);
+        assert!(result.is_ok());
+
+        // Check we have one receipt per step
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 2);
     }
 }
