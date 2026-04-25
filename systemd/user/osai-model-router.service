@@ -1,0 +1,20 @@
+[Unit]
+Description=OSAI Model Router Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/%u/.local/bin/osai-model-router-start
+EnvironmentFile=%h/.config/osai/model-router.env
+Restart=on-failure
+RestartSec=5
+User=%u
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/osai/receipts
+
+[Install]
+WantedBy=default.target

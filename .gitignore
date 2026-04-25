@@ -35,3 +35,14 @@ secrets.*
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# OSAI generated receipts
+**/osai-*.json
+receipts/
+.osai-receipts/
+
+# Python artifacts
+services/model-router/.venv/
+**/__pycache__/
+**/.pytest_cache/
+*.pyc
