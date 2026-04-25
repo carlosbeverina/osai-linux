@@ -389,6 +389,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "osai-tool-executor"
+version = "0.1.0"
+dependencies = [
+ "osai-plan-dsl",
+ "osai-receipt-logger",
+ "osai-toolbroker",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "osai-toolbroker"
 version = "0.1.0"
 dependencies = [

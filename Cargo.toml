@@ -4,7 +4,8 @@ members = [
   "crates/osai-toolbroker",
   "crates/osai-plan-dsl",
   "crates/osai-receipt-logger",
-  "crates/osai-agent-cli"
+  "crates/osai-agent-cli",
+  "crates/osai-tool-executor"
 ]
 
 [workspace.package]
