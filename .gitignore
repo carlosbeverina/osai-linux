@@ -22,3 +22,6 @@ secrets.*
 # Local model/cache data
 .models/
 .ollama/
+
+# Claude Code local settings
+.claude/settings.local.json
