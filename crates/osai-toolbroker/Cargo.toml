@@ -1,6 +1,16 @@
 [package]
 name = "osai-toolbroker"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+osai-plan-dsl = { path = "../osai-plan-dsl" }
+osai-receipt-logger = { path = "../osai-receipt-logger" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

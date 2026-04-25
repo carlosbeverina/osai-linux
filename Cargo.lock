@@ -272,6 +272,16 @@ dependencies = [
 [[package]]
 name = "osai-toolbroker"
 version = "0.1.0"
+dependencies = [
+ "osai-plan-dsl",
+ "osai-receipt-logger",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
 
 [[package]]
 name = "prettyplease"
