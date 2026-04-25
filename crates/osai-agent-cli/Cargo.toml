@@ -14,8 +14,11 @@ osai-toolbroker = { path = "../osai-toolbroker" }
 osai-tool-executor = { path = "../osai-tool-executor" }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]

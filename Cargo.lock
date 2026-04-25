@@ -817,9 +817,12 @@ dependencies = [
  "osai-receipt-logger",
  "osai-tool-executor",
  "osai-toolbroker",
+ "reqwest",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
+ "url",
  "uuid",
 ]
 

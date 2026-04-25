@@ -181,6 +181,77 @@ Creates a new OSAI agent directory with:
 
 Does not overwrite existing files.
 
+### Doctor Command
+
+#### Run diagnostic checks
+```bash
+osai-agent doctor [OPTIONS]
+```
+
+Runs OSAI diagnostic checks for development and debugging.
+
+**Options:**
+- `--repo-root <path>` - Path to repository root (defaults to current directory)
+- `--model-router-url <url>` - Model Router URL (defaults to http://127.0.0.1:8088)
+- `--receipts-dir <path>` - Directory for receipts (defaults to /tmp/osai-doctor-receipts)
+- `--skip-model-router` - Skip Model Router health checks
+- `--json` - Output machine-readable JSON
+
+**Checks performed:**
+1. `repo_structure` - Verifies required paths exist
+2. `examples_validate` - Validates example plan files (organize-downloads.yml, model-chat.yml, risky-shell.yml)
+3. `policy_validate` - Validates default-secure.yml policy
+4. `receipts_dir` - Creates receipts directory and tests write permissions
+5. `model_router_health` - Checks Model Router /health endpoint (unless --skip-model-router)
+6. `model_router_models` - Verifies required models are available (unless --skip-model-router)
+
+**Output format (human):**
+```
+OSAI Doctor
+
+[OK] repo_structure: All required paths exist
+[OK] examples_validate: ...
+[OK] policy_validate: ...
+[OK] receipts_dir: ...
+[OK] model_router_health: ...
+[OK] model_router_models: ...
+
+Summary: 6 ok, 0 warn, 0 fail
+```
+
+**Output format (JSON):**
+```json
+{
+  "status": "ok",
+  "checks": [
+    {"name": "repo_structure", "status": "OK", "message": "..."}
+  ],
+  "summary": {"ok": 6, "warn": 0, "fail": 0}
+}
+```
+
+**Status levels:**
+- `OK` - Check passed
+- `WARN` - Check passed with warnings
+- `FAIL` - Check failed
+
+**Exit behavior:**
+- Exit 0 if no FAIL checks
+- Exit non-zero if any FAIL
+- Warnings do not affect exit code
+
+**Examples:**
+```bash
+# Run with default settings (skips Model Router)
+cargo run -p osai-agent-cli -- doctor --skip-model-router
+
+# Check with running Model Router
+cargo run -p osai-agent-cli -- doctor --model-router-url http://127.0.0.1:8088
+
+# JSON output for automation
+cargo run -p osai-agent-cli -- doctor --json --skip-model-router
+```
+
 ## Example Agent Manifest
 
 ```yaml
