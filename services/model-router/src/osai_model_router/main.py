@@ -51,7 +51,10 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
 
     try:
         # Route the request
-        response, provider_name, routed_model = router_instance.route(request)
+        response, provider_name, routed_model, reasoning_stripped = router_instance.route(request)
+
+        # Determine if response was truncated
+        truncated = response.choices[0].finish_reason == "length" if response.choices else False
 
         # Write receipt
         request_id = f"osai-{int(time.time() * 1000)}"
@@ -62,7 +65,9 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
             routed_model=routed_model,
             messages=[{"role": m.role, "content": ""} for m in request.messages],
             status="executed",
-            metadata=request.metadata
+            metadata=request.metadata,
+            reasoning_stripped=reasoning_stripped,
+            truncated=truncated
         )
 
         return response

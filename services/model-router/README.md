@@ -79,10 +79,48 @@ Every chat completion request writes a JSON receipt to:
 
 Receipts include:
 - Request ID, timestamp, provider
-- Model routing decisions
-- Privacy/complexity/speed metadata
+- Model routing decisions (requested_model, routed_model)
+- Privacy/complexity/speed metadata from request
+- `reasoning_stripped`: Whether hidden thinking blocks were removed
+- `truncated`: Whether response was truncated due to max_tokens
 - Status (executed/failed)
 - **Never** the full prompt content
+- **Never** the raw model output
+
+### What Receipts Do NOT Store
+
+For security and privacy:
+- Full prompts or message content are never stored
+- Raw model responses are never stored
+- Only message count and roles are recorded
+- API keys are never logged or stored
+
+## Response Normalization
+
+MiniMax models may include hidden "thinking" blocks (<think>...</think>) in their responses. These are automatically stripped before the response is returned to clients.
+
+### How It Works
+
+1. Complete <think>...</think> blocks are removed
+2. Incomplete <think> blocks (at end of response) are removed
+3. Content is trimmed of leading/trailing whitespace
+4. If all content was thinking blocks, a fallback message is returned
+
+### Fallback Behavior
+
+If a response contains only hidden reasoning and no visible answer, the router returns:
+
+```
+"The model response contained only hidden reasoning and no visible answer."
+```
+
+The receipt will have `reasoning_stripped: true` and `truncated: false`.
+
+## Default max_tokens
+
+When calling MiniMax models, if `max_tokens` is not specified in the request, the router uses a safe default of 1024 tokens. User-provided `max_tokens` values are always preserved.
+
+If the response is truncated due to `max_tokens`, the receipt will have `truncated: true`.
 
 ## Running Locally
 
@@ -149,10 +187,12 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 ## Security Rules
 
-- **Do not store or log full prompts** - Only message count and roles are recorded
+- **Do not store or log full prompts** - Only message count and roles are recorded in receipts
+- **Do not store raw model outputs** - Only metadata about the response is stored
 - **Do not log API keys** - Keys are never written to logs or receipts
 - **Bind to localhost only** - Service listens on 127.0.0.1 only
 - **Do not commit secrets** - Use `.env` files excluded from version control
+- **Strip thinking blocks** - Hidden reasoning is removed before returning responses
 
 ## Endpoints
 

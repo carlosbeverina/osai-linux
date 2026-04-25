@@ -41,7 +41,9 @@ class ReceiptWriter:
         messages: list[dict[str, str]],
         status: str,
         error: str | None = None,
-        metadata: dict[str, Any] | None = None
+        metadata: dict[str, Any] | None = None,
+        reasoning_stripped: bool = False,
+        truncated: bool = False
     ) -> Path:
         """Write a receipt for a chat completion request.
 
@@ -54,6 +56,8 @@ class ReceiptWriter:
             status: "executed" or "failed"
             error: Error message if status is "failed"
             metadata: Request metadata including privacy, complexity, speed hints
+            reasoning_stripped: Whether thinking blocks were stripped from response
+            truncated: Whether response was truncated due to max_tokens
 
         Returns:
             Path to the written receipt file
@@ -82,7 +86,9 @@ class ReceiptWriter:
             "input_summary": {
                 "message_count": len(messages),
                 "roles": list(set(m.get("role", "") for m in messages))
-            }
+            },
+            "reasoning_stripped": reasoning_stripped,
+            "truncated": truncated
         }
 
         if error:
