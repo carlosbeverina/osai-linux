@@ -8,12 +8,14 @@ For full system architecture and MVP specification, see:
 
 - [OSAI MVP Specification v0.1](docs/architecture/OSAI_MVP_SPEC.md)
 
+**Note**: OpenClaw is not part of OSAI MVP core. See [OpenClaw Integration Decision](docs/architecture/OPENCLAW_DECISION.md) for rationale.
+
 ## Initial architecture
 
 - Linux base: Fedora Atomic / Universal Blue / BlueBuild
 - Local models: Gemma 4 E2B, Gemma 4 E4B, Gemma 4 26B
 - Cloud model: MiniMax-M2.7
-- Agent runtime: OpenClaw
+- Agent runtime: OSAI core (independent, not OpenClaw-dependent)
 - Safety layer: OSAI ToolBroker
 - UX: voice, mouse and keyboard
 - Core UI: OSAI Command Bar

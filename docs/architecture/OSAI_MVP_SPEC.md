@@ -470,13 +470,16 @@ cargo run -p osai-agent-cli -- doctor --json --skip-model-router
 | M1 Core Safety Runtime | **COMPLETED** | Plan DSL, ToolBroker, ToolExecutor, Receipt Logger |
 | M2 Model Router Integration | **COMPLETED** | Model Router service with mock mode, CLI integration |
 | M3 Service Orchestration | **COMPLETED** | Dev scripts, systemd units, doctor command |
-| M4 OpenClaw Bridge | NEXT | Protocol gateway for external agent communication |
-| M5 OSAI Command Bar UI | PLANNED | Core Tauri/TypeScript UI for agent interaction |
-| M6 Voice Daemon | PLANNED | Push-to-talk voice intent capture |
-| M7 Agent App SDK and Manifests | PLANNED | Agent installation, permissions, manifest schema |
+| M4 Local Model Provider | NEXT | Gemma 4 integration (real, not mock) |
+| M5 Memory Manager | PLANNED | Scoped, inspectable agent memory |
+| M6 OSAI Command Bar UI | PLANNED | Core Tauri/TypeScript UI for agent interaction |
+| M7 Voice Daemon | PLANNED | Push-to-talk voice intent capture |
 | M8 Fedora/Universal Blue Image | PLANNED | Base OSAI image with atomic updates |
 | M9 VM Test Image | PLANNED | Pre-built VM for testing without installation |
 | M10 Installer / Dual Boot | PLANNED | User-friendly installation with Windows dual boot |
+| M11 OpenClaw Bridge | **DEFERRED** | Optional protocol gateway (see [OpenClaw Decision](OPENCLAW_DECISION.md)) |
+
+**Note**: OpenClaw Bridge is explicitly deferred. See [OpenClaw Integration Decision](OPENCLAW_DECISION.md) for rationale.
 
 ## 10. Non-Goals for Now
 
@@ -484,6 +487,7 @@ The following are explicitly **NOT** in scope for MVP v0.1:
 
 - **No kernel modification** - OSAI runs on standard Fedora atomic
 - **No direct shell execution** - All execution via ToolBroker authorization
+- **No OpenClaw core dependency** - OSAI runtime is independent (see [decision](OPENCLAW_DECISION.md))
 - **No filesystem mutation until approval/rollback is stronger** - v0.1 ToolExecutor refuses FilesWrite, FilesMove, FilesDelete
 - **No always-listening microphone** - Voice is push-to-talk only
 - **No real agent marketplace** - Just manifests and directories
@@ -493,10 +497,12 @@ The following are explicitly **NOT** in scope for MVP v0.1:
 
 These items need further design before implementation:
 
-1. **OpenClaw Gateway Protocol** - Exact wire format for agent communication?
-2. **GNOME vs Tauri First UI** - Which platform to prioritize for Command Bar?
-3. **Ollama/Gemma Integration** - Direct Ollama API or Model Router as Ollama wrapper?
-4. **Local Model Management** - How to download, update, and select local models?
+1. **GNOME vs Tauri First UI** - Which platform to prioritize for Command Bar?
+2. **Ollama/Gemma Integration** - Direct Ollama API or Model Router as Ollama wrapper?
+3. **Local Model Management** - How to download, update, and select local models?
+4. **Memory Manager Design** - Scope, persistence, and access control for agent memory?
+5. **Rollback for File Mutations** - Atomic transactions or copy-on-write backup?
+6. **Policy UI** - How should users view and edit policies visually?
 5. **Memory Manager Design** - Scope, persistence, and access control for agent memory?
 6. **Rollback for File Mutations** - Atomic transactions or copy-on-write backup?
 7. **Policy UI** - How should users view and edit policies visually?
