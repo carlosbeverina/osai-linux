@@ -1,6 +1,11 @@
 [package]
 name = "osai-plan-dsl"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
