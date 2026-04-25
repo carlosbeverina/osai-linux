@@ -11,6 +11,7 @@ path = "src/main.rs"
 osai-plan-dsl = { path = "../osai-plan-dsl" }
 osai-receipt-logger = { path = "../osai-receipt-logger" }
 osai-toolbroker = { path = "../osai-toolbroker" }
+osai-tool-executor = { path = "../osai-tool-executor" }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 serde = { workspace = true }

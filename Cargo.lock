@@ -358,6 +358,7 @@ dependencies = [
  "clap",
  "osai-plan-dsl",
  "osai-receipt-logger",
+ "osai-tool-executor",
  "osai-toolbroker",
  "serde",
  "serde_yaml",

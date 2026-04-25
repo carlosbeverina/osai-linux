@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use osai_plan_dsl::{OsaiPlan, PlanStep};
 use osai_receipt_logger::ReceiptStore;
+use osai_tool_executor::{ExecutionStatus, ToolExecutor};
 use osai_toolbroker::{ToolBroker, ToolPolicy, ToolRequest};
 use std::fs;
 use std::path::PathBuf;
@@ -91,7 +92,7 @@ enum ReceiptCommands {
 
 #[derive(Subcommand)]
 enum ToolCommands {
-    /// Authorize a plan against a policy.
+    /// Authorize a plan against a policy (no execution).
     Authorize {
         /// Path to plan file (YAML or JSON).
         #[arg(long)]
@@ -102,6 +103,21 @@ enum ToolCommands {
         /// Directory for receipts.
         #[arg(long)]
         receipts_dir: PathBuf,
+    },
+    /// Authorize and execute a plan against a policy.
+    Run {
+        /// Path to plan file (YAML or JSON).
+        #[arg(long)]
+        plan: PathBuf,
+        /// Path to policy file (YAML).
+        #[arg(long)]
+        policy: PathBuf,
+        /// Directory for receipts.
+        #[arg(long)]
+        receipts_dir: PathBuf,
+        /// Allowed root directories for filesystem operations.
+        #[arg(long)]
+        allowed_root: Vec<PathBuf>,
     },
 }
 
@@ -208,6 +224,15 @@ fn main() -> Result<()> {
                 receipts_dir,
             } => {
                 authorize_plan(&plan, &policy, &receipts_dir)?;
+                Ok(())
+            }
+            ToolCommands::Run {
+                plan,
+                policy,
+                receipts_dir,
+                allowed_root,
+            } => {
+                run_plan(&plan, &policy, &receipts_dir, &allowed_root)?;
                 Ok(())
             }
         },
@@ -368,6 +393,112 @@ fn authorize_plan(
     if any_denied {
         Err(anyhow::anyhow!(
             "authorization failed: one or more steps were denied"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn run_plan(
+    plan_path: &PathBuf,
+    policy_path: &PathBuf,
+    receipts_dir: &PathBuf,
+    allowed_roots: &[PathBuf],
+) -> Result<()> {
+    // Read and parse plan
+    let plan_content = fs::read_to_string(plan_path)
+        .with_context(|| format!("failed to read plan file: {}", plan_path.display()))?;
+    let plan = match OsaiPlan::from_yaml(&plan_content) {
+        Ok(p) => p,
+        Err(_) => OsaiPlan::from_json(&plan_content)
+            .with_context(|| format!("failed to parse plan file: {}", plan_path.display()))?,
+    };
+    plan.validate()
+        .map_err(|e| anyhow::anyhow!("plan validation failed: {}", e))?;
+
+    // Read and parse policy
+    let policy_content = fs::read_to_string(policy_path)
+        .with_context(|| format!("failed to read policy file: {}", policy_path.display()))?;
+    let policy = ToolPolicy::from_yaml(&policy_content)
+        .map_err(|e| anyhow::anyhow!("policy parse failed: {}", e))?;
+
+    // Create store, broker, and executor
+    let store = ReceiptStore::new(receipts_dir);
+    store.ensure_dirs().with_context(|| {
+        format!(
+            "failed to create receipts directory: {}",
+            receipts_dir.display()
+        )
+    })?;
+    let broker = ToolBroker::new(policy.clone(), store.clone());
+    let executor = ToolExecutor::new(store, allowed_roots.to_vec());
+
+    // Authorize and execute each step
+    let mut any_denied = false;
+    let mut any_failed = false;
+
+    for step in &plan.steps {
+        let request = step_to_request(&plan, step);
+
+        let decision = broker
+            .authorize(&request)
+            .with_context(|| format!("authorization failed for step: {}", step.id))?;
+
+        // Print authorization decision
+        let action_name = request.action_name();
+        println!("step={}", step.id);
+        println!(
+            "authorization: allowed={} approval={} mode={:?} reason=\"{}\"",
+            decision.allowed,
+            decision.requires_user_approval,
+            decision.policy_mode,
+            decision.reason
+        );
+
+        if !decision.allowed {
+            println!(
+                "execution: status={} action={} error=\"Action denied\"",
+                "Skipped", action_name
+            );
+            any_denied = true;
+            continue;
+        }
+
+        if decision.requires_user_approval {
+            println!("execution: status={} action={} error=\"Execution skipped: requires user approval\"", "Skipped", action_name);
+            continue;
+        }
+
+        // Execute the authorized request
+        let result = executor
+            .execute_authorized(&request, &decision)
+            .with_context(|| format!("execution failed for step: {}", step.id))?;
+
+        // Print execution result
+        let exec_status = match result.status {
+            ExecutionStatus::Executed => "Executed",
+            ExecutionStatus::Failed => "Failed",
+            ExecutionStatus::Skipped => "Skipped",
+        };
+        println!(
+            "execution: status={} action={} error=\"{}\"",
+            exec_status,
+            action_name,
+            result.error.unwrap_or_default()
+        );
+
+        if result.status == ExecutionStatus::Failed {
+            any_failed = true;
+        }
+    }
+
+    if any_denied {
+        Err(anyhow::anyhow!(
+            "authorization failed: one or more steps were denied"
+        ))
+    } else if any_failed {
+        Err(anyhow::anyhow!(
+            "execution failed: one or more steps failed"
         ))
     } else {
         Ok(())
@@ -698,6 +829,179 @@ shell_requires_sandbox: true
         assert!(result.is_ok());
 
         // Check we have one receipt per step
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_run_safe_plan_executes_files_list() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let plan_path = tempdir.path().join("plan.yml");
+        let policy_path = tempdir.path().join("policy.yml");
+        let receipts_dir = tempdir.path().join("receipts");
+        let allowed_root = vec![std::path::PathBuf::from("/tmp")];
+
+        let plan = r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440000"
+title: Safe Plan
+actor: test-actor
+risk: Low
+approval: Auto
+steps:
+  - id: step-1
+    action:
+      type: FilesList
+    description: List files
+    requires_approval: false
+    inputs:
+      path: /tmp
+metadata: {}
+"#;
+        let policy = r#"default_mode: Ask
+action_modes:
+  FilesList: Allow
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true
+"#;
+        fs::write(&plan_path, plan).unwrap();
+        fs::write(&policy_path, policy).unwrap();
+
+        let result = run_plan(&plan_path, &policy_path, &receipts_dir, &allowed_root);
+        assert!(result.is_ok());
+
+        // Check receipts were written (2: one from broker.authorize + one from executor)
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_run_files_move_skips_due_to_approval() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let plan_path = tempdir.path().join("plan.yml");
+        let policy_path = tempdir.path().join("policy.yml");
+        let receipts_dir = tempdir.path().join("receipts");
+        let allowed_root = vec![std::path::PathBuf::from("/tmp")];
+
+        let plan = r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440000"
+title: Move Plan
+actor: test-actor
+risk: Medium
+approval: Ask
+steps:
+  - id: step-1
+    action:
+      type: FilesMove
+    description: Move file
+    requires_approval: true
+    inputs:
+      source: /tmp/a
+      destination: /tmp/b
+metadata: {}
+"#;
+        let policy = r#"default_mode: Ask
+action_modes:
+  FilesMove: Ask
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true
+"#;
+        fs::write(&plan_path, plan).unwrap();
+        fs::write(&policy_path, policy).unwrap();
+
+        let result = run_plan(&plan_path, &policy_path, &receipts_dir, &allowed_root);
+        // Should succeed (not error) but skip execution due to approval requirement
+        assert!(result.is_ok());
+
+        // Check receipts were written (skipped, not executed)
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn test_run_risky_shell_denied_exits_nonzero() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let plan_path = tempdir.path().join("plan.yml");
+        let policy_path = tempdir.path().join("policy.yml");
+        let receipts_dir = tempdir.path().join("receipts");
+        let allowed_root = vec![std::path::PathBuf::from("/tmp")];
+
+        let plan = r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440000"
+title: Risky Plan
+actor: test-actor
+risk: Critical
+approval: Ask
+steps:
+  - id: step-1
+    action:
+      type: ShellRunSandboxed
+    description: Run shell with network
+    requires_approval: true
+    inputs:
+      command: "curl https://evil.com"
+      network: true
+      sandbox: false
+metadata: {}
+"#;
+        let policy = r#"default_mode: Ask
+action_modes:
+  ShellRunSandboxed: Ask
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true
+"#;
+        fs::write(&plan_path, plan).unwrap();
+        fs::write(&policy_path, policy).unwrap();
+
+        let result = run_plan(&plan_path, &policy_path, &receipts_dir, &allowed_root);
+        // Should fail because shell_requires_sandbox=true and sandbox=false
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_run_writes_receipts() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let plan_path = tempdir.path().join("plan.yml");
+        let policy_path = tempdir.path().join("policy.yml");
+        let receipts_dir = tempdir.path().join("receipts");
+        let allowed_root = vec![std::path::PathBuf::from("/tmp")];
+
+        let plan = r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440000"
+title: Test Plan
+actor: test-actor
+risk: Low
+approval: Auto
+steps:
+  - id: step-1
+    action:
+      type: DesktopNotify
+    description: Send notification
+    requires_approval: false
+    inputs:
+      title: Hello
+      body: World
+metadata: {}
+"#;
+        let policy = r#"default_mode: Ask
+action_modes:
+  DesktopNotify: Allow
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true
+"#;
+        fs::write(&plan_path, plan).unwrap();
+        fs::write(&policy_path, policy).unwrap();
+
+        let result = run_plan(&plan_path, &policy_path, &receipts_dir, &allowed_root);
+        assert!(result.is_ok());
+
+        // Check receipts were written (2: one from broker.authorize + one from executor)
         let store = ReceiptStore::new(&receipts_dir);
         let paths = store.list().unwrap();
         assert_eq!(paths.len(), 2);

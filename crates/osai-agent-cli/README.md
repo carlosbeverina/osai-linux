@@ -59,6 +59,54 @@ step=<step_id> action=<action> allowed=<true|false> approval=<true|false> mode=<
 
 Exit code is non-zero if any step is denied.
 
+#### Run a plan (authorize + execute)
+```bash
+osai-agent tool run --plan <path> --policy <path> --receipts-dir <path> --allowed-root <path>...
+```
+Authorizes and executes each step in a plan against a policy, then creates audit receipts.
+
+**This command both authorizes AND executes safe actions.** It connects Plan DSL + ToolBroker + ToolExecutor.
+
+For each step, it:
+1. Converts the step into a ToolRequest
+2. Calls the ToolBroker to authorize
+3. Prints authorization decision
+4. Calls ToolExecutor to execute (if allowed and no approval required)
+5. Prints execution result
+6. Writes a receipt
+
+Output format per step:
+```
+step=<step_id>
+authorization: allowed=<true|false> approval=<true|false> mode=<mode> reason="<reason>"
+execution: status=<Executed|Failed|Skipped> action=<action> error="<error_or_empty>"
+```
+
+**Execution vs Authorization**: `tool authorize` only checks if actions are permitted by policy. `tool run` actually executes safe actions (FilesList, DesktopNotify, ModelChat) through ToolExecutor after authorization.
+
+Exit code is non-zero if any step is denied or execution fails.
+
+**v0.1 Executable Actions**: Only FilesList, DesktopNotify, and ModelChat are executed (simulated). All other actions (FilesWrite, FilesMove, FilesDelete, ShellRunSandboxed, BrowserOpenUrl, Custom) are refused.
+
+**Path Restrictions**: FilesList is constrained to allowed_root directories.
+
+#### Run example
+```bash
+osai-agent tool run \
+  --plan examples/plans/safe-list.yml \
+  --policy examples/policies/default-secure.yml \
+  --receipts-dir /tmp/osai-receipts \
+  --allowed-root /tmp \
+  --allowed-root /home/user
+```
+
+Sample output:
+```
+step=step-1
+authorization: allowed=true approval=false mode=Allow reason="Action FilesList allowed by policy"
+execution: status=Executed action=FilesList error=""
+```
+
 ### Receipt Commands
 
 #### List receipts
