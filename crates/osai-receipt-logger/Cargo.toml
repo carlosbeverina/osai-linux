@@ -1,0 +1,6 @@
+[package]
+name = "osai-receipt-logger"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
