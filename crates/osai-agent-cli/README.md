@@ -61,7 +61,7 @@ Exit code is non-zero if any step is denied.
 
 #### Run a plan (authorize + execute)
 ```bash
-osai-agent tool run --plan <path> --policy <path> --receipts-dir <path> --allowed-root <path>... [--approve <step_id>] [--approve-all]
+osai-agent tool run --plan <path> --policy <path> --receipts-dir <path> --allowed-root <path>... [--approve <step_id>] [--approve-all] [--model-router-url <url>]
 ```
 Authorizes and executes each step in a plan against a policy, then creates audit receipts.
 
@@ -249,6 +249,91 @@ step=step-4 action=ReceiptCreate allowed=true approval=false mode=Allow reason="
 ```
 
 If any step is denied, the exit code will be non-zero.
+
+## Model Router Integration
+
+When executing `ModelChat` actions, ToolExecutor can optionally route requests through a local Model Router service instead of returning simulated responses.
+
+**Important Security Constraints:**
+- Model Router URL must use `http://` (not `https://`)
+- Model Router URL must be loopback only (`localhost` or `127.0.0.1`)
+- External URLs are rejected
+- Non-loopback hostnames are rejected
+- Empty URLs are rejected
+
+**Without `--model-router-url`**: `ModelChat` returns a simulated response indicating the feature is not yet implemented.
+
+**With `--model-router-url`**: `ModelChat` POSTs to the Model Router's `/v1/chat/completions` endpoint and returns the actual model response.
+
+### Example with Model Router
+
+```bash
+cargo run -p osai-agent-cli -- tool run \
+  --plan examples/plans/model-chat.yml \
+  --policy examples/policies/default-secure.yml \
+  --receipts-dir /tmp/osai-receipts \
+  --allowed-root "$HOME/Downloads" \
+  --model-router-url http://127.0.0.1:8088
+```
+
+This executes the `model-chat.yml` plan which contains a single `ModelChat` step. The Model Router (`osai-local`, `gemma4:*`, `MiniMax-*`, `osai-auto`) handles the actual model invocation.
+
+### ModelChat Inputs
+
+The `ModelChat` action accepts these inputs:
+
+| Input | Type | Required | Description |
+|-------|------|----------|-------------|
+| `model` | string | No | Model identifier (default: `osai-auto`) |
+| `prompt` | string | Yes* | Single prompt string (if no `messages`) |
+| `messages` | array | Yes* | Array of message objects with `role` and `content` |
+| `metadata` | object | No | Metadata hints for auto-routing (`privacy`, `complexity`, `speed`) |
+
+*Either `prompt` or `messages` must be provided.
+
+### ModelChat Output
+
+When called via Model Router, the output JSON is:
+```json
+{
+  "provider": "model-router",
+  "model": "<actual-model-used>",
+  "content": "<assistant-response>",
+  "simulated": false
+}
+```
+
+Without Model Router (simulated):
+```json
+{
+  "simulated": true,
+  "message": "ModelChat execution is not implemented yet"
+}
+```
+
+### Example Plan: model-chat.yml
+
+See `examples/plans/model-chat.yml` for a complete example:
+```yaml
+version: "0.1"
+id: "e8b9a2c4-1234-5678-9abc-def012345678"
+title: "Model Chat Example"
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "chat-step-1"
+    action:
+      type: ModelChat
+    description: "Chat with local model using osai-auto"
+    requires_approval: false
+    inputs:
+      model: "osai-auto"
+      prompt: "Hello, how are you?"
+      metadata:
+        privacy: "local_only"
+        complexity: "low"
+```
 
 ## Exit Codes
 

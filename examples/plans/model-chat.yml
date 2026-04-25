@@ -1,0 +1,23 @@
+version: "0.1"
+id: "e8b9a2c4-1234-5678-9abc-def012345678"
+title: "Model Chat Example"
+description: "Test ModelChat action with local model router"
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "chat-step-1"
+    action:
+      type: ModelChat
+    description: "Chat with local model using osai-auto"
+    requires_approval: false
+    inputs:
+      model: "osai-auto"
+      prompt: "Hello, how are you?"
+      metadata:
+        privacy: "local_only"
+        complexity: "low"
+rollback:
+  available: false
+  steps: []
+metadata: {}

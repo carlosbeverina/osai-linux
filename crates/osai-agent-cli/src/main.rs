@@ -124,6 +124,9 @@ enum ToolCommands {
         /// Approve all steps that require user approval.
         #[arg(long)]
         approve_all: bool,
+        /// Optional URL for the model router (must be loopback only).
+        #[arg(long)]
+        model_router_url: Option<String>,
     },
 }
 
@@ -239,6 +242,7 @@ fn main() -> Result<()> {
                 allowed_root,
                 approve,
                 approve_all,
+                model_router_url,
             } => {
                 run_plan(
                     &plan,
@@ -247,6 +251,7 @@ fn main() -> Result<()> {
                     &allowed_root,
                     &approve,
                     approve_all,
+                    model_router_url.as_deref(),
                 )?;
                 Ok(())
             }
@@ -421,6 +426,7 @@ fn run_plan(
     allowed_roots: &[PathBuf],
     approve: &[String],
     approve_all: bool,
+    model_router_url: Option<&str>,
 ) -> Result<()> {
     // Read and parse plan
     let plan_content = fs::read_to_string(plan_path)
@@ -448,7 +454,14 @@ fn run_plan(
         )
     })?;
     let broker = ToolBroker::new(policy.clone(), store.clone());
-    let executor = ToolExecutor::new(store, allowed_roots.to_vec());
+
+    // Build ToolExecutor with optional model router URL
+    let mut executor = ToolExecutor::new(store, allowed_roots.to_vec());
+    if let Some(url) = model_router_url {
+        executor = executor
+            .with_model_router_url(url)
+            .map_err(|e| anyhow::anyhow!("invalid model router URL: {}", e))?;
+    }
 
     // Authorize and execute each step
     let mut any_denied = false;
@@ -930,6 +943,7 @@ shell_requires_sandbox: true
             &allowed_root,
             &[],
             false,
+            None,
         );
         assert!(result.is_ok());
 
@@ -981,6 +995,7 @@ shell_requires_sandbox: true
             &allowed_root,
             &[],
             false,
+            None,
         );
         // Should succeed (not error) but skip execution due to approval requirement
         assert!(result.is_ok());
@@ -1034,6 +1049,7 @@ shell_requires_sandbox: true
             &allowed_root,
             &[],
             false,
+            None,
         );
         // Should fail because shell_requires_sandbox=true and sandbox=false
         assert!(result.is_err());
@@ -1081,6 +1097,7 @@ shell_requires_sandbox: true
             &allowed_root,
             &[],
             false,
+            None,
         );
         assert!(result.is_ok());
 
@@ -1133,6 +1150,7 @@ shell_requires_sandbox: true
             &allowed_root,
             &[],
             false,
+            None,
         );
         assert!(result.is_ok());
 
@@ -1185,6 +1203,7 @@ shell_requires_sandbox: true
             &allowed_root,
             &["step-1".to_string()],
             false,
+            None,
         );
         // Executor refuses FilesMove in v0.1, so this fails
         assert!(result.is_err());
@@ -1246,6 +1265,7 @@ shell_requires_sandbox: true
             &allowed_root,
             &[],
             true,
+            None,
         );
         // Executor refuses FilesMove in v0.1, so this fails
         assert!(result.is_err());
@@ -1298,6 +1318,7 @@ shell_requires_sandbox: true
             &allowed_root,
             &["step-1".to_string()],
             false,
+            None,
         );
         // Executor refuses BrowserOpenUrl in v0.1, so this fails
         assert!(result.is_err());
@@ -1348,6 +1369,7 @@ shell_requires_sandbox: true
             &allowed_root,
             &[],
             true,
+            None,
         );
         // Should fail because shell_requires_sandbox=true and sandbox=false
         assert!(result.is_err());

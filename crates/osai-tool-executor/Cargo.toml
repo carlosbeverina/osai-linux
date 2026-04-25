@@ -11,6 +11,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
+url = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+mockito = "1"

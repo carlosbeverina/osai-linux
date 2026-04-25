@@ -66,6 +66,10 @@ pub struct ExecutionResult {
 pub enum ToolExecutorError {
     #[error("failed to write receipt: {0}")]
     ReceiptWrite(String),
+    #[error("invalid model router URL: {0}")]
+    InvalidModelRouterUrl(String),
+    #[error("model router request failed: {0}")]
+    ModelRouterRequest(String),
 }
 
 /// Keys that indicate sensitive data.
@@ -78,6 +82,10 @@ pub struct ToolExecutor {
     receipt_store: ReceiptStore,
     /// Allowed root directories for filesystem operations.
     allowed_roots: Vec<PathBuf>,
+    /// Optional URL for model router (must be loopback only).
+    model_router_url: Option<String>,
+    /// HTTP client for model router requests (blocking).
+    http_client: reqwest::blocking::Client,
 }
 
 impl ToolExecutor {
@@ -86,7 +94,62 @@ impl ToolExecutor {
         Self {
             receipt_store,
             allowed_roots,
+            model_router_url: None,
+            http_client: reqwest::blocking::Client::new(),
         }
+    }
+
+    /// Sets the model router URL with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ToolExecutorError` if the URL is not a valid loopback URL.
+    pub fn with_model_router_url(
+        mut self,
+        url: impl Into<String>,
+    ) -> Result<Self, ToolExecutorError> {
+        let url = url.into();
+        Self::validate_model_router_url(&url)?;
+        self.model_router_url = Some(url);
+        Ok(self)
+    }
+
+    /// Validates that a model router URL is a valid loopback URL.
+    fn validate_model_router_url(url: &str) -> Result<(), ToolExecutorError> {
+        if url.is_empty() {
+            return Err(ToolExecutorError::InvalidModelRouterUrl(
+                "model router URL cannot be empty".to_string(),
+            ));
+        }
+
+        // Parse the URL
+        let parsed = url::Url::parse(url)
+            .map_err(|e| ToolExecutorError::InvalidModelRouterUrl(format!("invalid URL: {}", e)))?;
+
+        // Must be http (not https)
+        if parsed.scheme() != "http" {
+            return Err(ToolExecutorError::InvalidModelRouterUrl(format!(
+                "model router URL must use http, not {}",
+                parsed.scheme()
+            )));
+        }
+
+        // Must be loopback
+        let host = parsed.host_str().ok_or_else(|| {
+            ToolExecutorError::InvalidModelRouterUrl(
+                "model router URL must have a host".to_string(),
+            )
+        })?;
+
+        let is_loopback = host == "localhost" || host == "127.0.0.1";
+        if !is_loopback {
+            return Err(ToolExecutorError::InvalidModelRouterUrl(format!(
+                "model router URL must be localhost or 127.0.0.1, not {}",
+                host
+            )));
+        }
+
+        Ok(())
     }
 
     /// Redacts secret-looking values from inputs.
@@ -101,6 +164,53 @@ impl ToolExecutor {
                 redacted.insert(key.clone(), Value::String("[REDACTED]".to_string()));
             } else {
                 redacted.insert(key.clone(), value.clone());
+            }
+        }
+
+        Value::Object(redacted)
+    }
+
+    /// Redacts inputs for ModelChat action - never stores full prompt or messages.
+    fn redact_model_chat_inputs(&self, inputs: &BTreeMap<String, Value>) -> Value {
+        let mut redacted = serde_json::Map::new();
+
+        for (key, value) in inputs {
+            // Never store prompt or messages content - just record presence
+            if key == "prompt" || key == "messages" {
+                if key == "prompt" {
+                    // For prompt, store the length only
+                    if let Some(s) = value.as_str() {
+                        redacted.insert(
+                            key.clone(),
+                            Value::String(format!("[prompt: {} chars]", s.len())),
+                        );
+                    } else {
+                        redacted.insert(key.clone(), Value::String("[REDACTED]".to_string()));
+                    }
+                } else if key == "messages" {
+                    // For messages, store count only
+                    if let Some(arr) = value.as_array() {
+                        redacted.insert(
+                            key.clone(),
+                            serde_json::json!({
+                                "message_count": arr.len(),
+                                "roles": arr.iter().filter_map(|m| m.get("role").and_then(|r| r.as_str())).collect::<Vec<_>>()
+                            }),
+                        );
+                    } else {
+                        redacted.insert(key.clone(), Value::String("[REDACTED]".to_string()));
+                    }
+                }
+            } else {
+                // For other keys, apply standard redaction
+                let lower_key = key.to_lowercase();
+                let is_secret = SECRET_KEYS.iter().any(|s| lower_key.contains(s));
+
+                if is_secret {
+                    redacted.insert(key.clone(), Value::String("[REDACTED]".to_string()));
+                } else {
+                    redacted.insert(key.clone(), value.clone());
+                }
             }
         }
 
@@ -136,7 +246,11 @@ impl ToolExecutor {
     ) -> Receipt {
         let action_name = Self::action_name(&request.action);
 
-        let inputs_redacted = self.redact_inputs(&request.inputs);
+        let inputs_redacted = if matches!(request.action, ActionKind::ModelChat) {
+            self.redact_model_chat_inputs(&request.inputs)
+        } else {
+            self.redact_inputs(&request.inputs)
+        };
 
         let mut receipt = Receipt::new(&request.actor, &action_name)
             .with_tool("ToolExecutor")
@@ -267,11 +381,108 @@ impl ToolExecutor {
         }))
     }
 
-    /// Executes ModelChat action (simulated).
-    fn execute_model_chat(&self, _request: &ToolRequest) -> Result<Value, String> {
+    /// Executes ModelChat action.
+    ///
+    /// If model_router_url is configured, calls the local Model Router.
+    /// Otherwise, returns a simulated response.
+    fn execute_model_chat(&self, request: &ToolRequest) -> Result<Value, String> {
+        let model = request
+            .inputs
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("osai-auto");
+
+        let prompt = request.inputs.get("prompt").and_then(|v| v.as_str());
+
+        let messages = request.inputs.get("messages").and_then(|v| v.as_array());
+
+        let metadata = request
+            .inputs
+            .get("metadata")
+            .and_then(|v| v.as_object())
+            .cloned();
+
+        // Build messages array for OpenAI-compatible API
+        let messages_for_api: Vec<serde_json::Value> = if let Some(msgs) = messages {
+            msgs.iter()
+                .filter_map(|m| {
+                    let role = m.get("role")?.as_str()?;
+                    let content = m.get("content")?.as_str()?;
+                    Some(serde_json::json!({
+                        "role": role,
+                        "content": content
+                    }))
+                })
+                .collect()
+        } else if let Some(p) = prompt {
+            vec![serde_json::json!({
+                "role": "user",
+                "content": p
+            })]
+        } else {
+            return Err(
+                "ModelChat requires either 'prompt' string or 'messages' array".to_string(),
+            );
+        };
+
+        // If no model router is configured, return simulated response
+        let router_url = match &self.model_router_url {
+            Some(url) => url.clone(),
+            None => {
+                return Ok(serde_json::json!({
+                    "simulated": true,
+                    "message": "ModelChat execution is not implemented yet"
+                }));
+            }
+        };
+
+        // Call the model router
+        let request_body = serde_json::json!({
+            "model": model,
+            "messages": messages_for_api,
+            "metadata": metadata
+        });
+
+        let full_url = format!("{}/v1/chat/completions", router_url);
+
+        let response = self
+            .http_client
+            .post(&full_url)
+            .json(&request_body)
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .map_err(|e| format!("failed to call model router at {}: {}", full_url, e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(format!("model router returned error {}: {}", status, body));
+        }
+
+        let response_body: serde_json::Value = response
+            .json()
+            .map_err(|e| format!("failed to parse model router response: {}", e))?;
+
+        // Extract content from OpenAI-compatible response
+        let content = response_body
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(|msg| msg.get("content"))
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| "model router response missing expected content".to_string())?;
+
+        let provider_model = response_body
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or(model);
+
         Ok(serde_json::json!({
-            "simulated": true,
-            "message": "ModelChat execution is not implemented yet"
+            "provider": "model-router",
+            "model": provider_model,
+            "content": content,
+            "simulated": false
         }))
     }
 
@@ -532,7 +743,12 @@ mod tests {
         let (_tempdir, store) = create_test_store();
         let executor = ToolExecutor::new(store, vec![]);
 
-        let request = create_allowed_request(ActionKind::ModelChat);
+        let mut request = create_allowed_request(ActionKind::ModelChat);
+        request.id = Uuid::new_v4();
+        let mut inputs = BTreeMap::new();
+        inputs.insert("prompt".to_string(), serde_json::json!("Hello"));
+        request.inputs = inputs;
+
         let decision = create_allowed_decision();
         let result = executor.execute_authorized(&request, &decision).unwrap();
 
@@ -662,9 +878,197 @@ mod tests {
 
     #[test]
     fn test_new_executor() {
-        let (_tempdir, store) = create_test_store();
-        let executor = ToolExecutor::new(store, vec![PathBuf::from("/home")]);
+        let (_tempdir, _store) = create_test_store();
+        let _executor = ToolExecutor::new(_store, vec![PathBuf::from("/home")]);
         // Just verify it constructs correctly
         assert!(true);
+    }
+
+    #[test]
+    fn test_model_chat_without_router_returns_simulated() {
+        let (_tempdir, store) = create_test_store();
+        let executor = ToolExecutor::new(store, vec![]);
+
+        let mut request = create_allowed_request(ActionKind::ModelChat);
+        request.id = Uuid::new_v4();
+        let mut inputs = BTreeMap::new();
+        inputs.insert("prompt".to_string(), serde_json::json!("Hello"));
+        request.inputs = inputs;
+
+        let decision = create_allowed_decision();
+        let result = executor.execute_authorized(&request, &decision).unwrap();
+
+        assert_eq!(result.status, ExecutionStatus::Executed);
+        let output = result.output.unwrap();
+        assert_eq!(output["simulated"], true);
+        assert!(output["message"]
+            .as_str()
+            .unwrap()
+            .contains("not implemented yet"));
+    }
+
+    #[test]
+    fn test_model_router_url_rejects_external_url() {
+        let (_tempdir, store) = create_test_store();
+        let result =
+            ToolExecutor::new(store, vec![]).with_model_router_url("https://api.example.com");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("must use http"));
+    }
+
+    #[test]
+    fn test_model_router_url_rejects_non_loopback() {
+        let (_tempdir, store) = create_test_store();
+
+        // Try with a hostname that's not loopback
+        let result =
+            ToolExecutor::new(store, vec![]).with_model_router_url("http://192.168.1.1:8088");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("localhost or 127.0.0.1"));
+    }
+
+    #[test]
+    fn test_model_router_url_accepts_127_0_0_1() {
+        let (_tempdir, store) = create_test_store();
+        let result =
+            ToolExecutor::new(store, vec![]).with_model_router_url("http://127.0.0.1:8088");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_model_router_url_accepts_localhost() {
+        let (_tempdir, store) = create_test_store();
+        let result =
+            ToolExecutor::new(store, vec![]).with_model_router_url("http://localhost:8088");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_model_router_url_rejects_empty() {
+        let (_tempdir, store) = create_test_store();
+        let result = ToolExecutor::new(store, vec![]).with_model_router_url("");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_model_chat_with_mocked_server_returns_provider() {
+        let (_tempdir, store) = create_test_store();
+
+        // Use mockito to mock the HTTP server
+        let mut server = mockito::Server::new();
+        let server_url = server.url();
+
+        let executor = ToolExecutor::new(store, vec![])
+            .with_model_router_url(&server_url)
+            .unwrap();
+
+        let mock_response = serde_json::json!({
+            "id": "chatcmpl-123",
+            "created": 1234567890,
+            "model": "osai-auto",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello from model router"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        });
+
+        server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::to_string(&mock_response).unwrap())
+            .create();
+
+        let mut request = create_allowed_request(ActionKind::ModelChat);
+        request.id = Uuid::new_v4();
+        let mut inputs = BTreeMap::new();
+        inputs.insert("prompt".to_string(), serde_json::json!("Hello"));
+        request.inputs = inputs;
+
+        let decision = create_allowed_decision();
+        let result = executor.execute_authorized(&request, &decision).unwrap();
+
+        assert_eq!(result.status, ExecutionStatus::Executed);
+        let output = result.output.unwrap();
+        assert_eq!(output["provider"], "model-router");
+        assert_eq!(output["content"], "Hello from model router");
+        assert_eq!(output["simulated"], false);
+    }
+
+    #[test]
+    fn test_model_chat_unreachable_router_returns_failed() {
+        let (_tempdir, store) = create_test_store();
+        let executor = ToolExecutor::new(store, vec![])
+            .with_model_router_url("http://127.0.0.1:9999")
+            .unwrap();
+
+        let mut request = create_allowed_request(ActionKind::ModelChat);
+        request.id = Uuid::new_v4();
+        let mut inputs = BTreeMap::new();
+        inputs.insert("prompt".to_string(), serde_json::json!("Hello"));
+        request.inputs = inputs;
+
+        let decision = create_allowed_decision();
+        let result = executor.execute_authorized(&request, &decision).unwrap();
+
+        assert_eq!(result.status, ExecutionStatus::Failed);
+        assert!(result.error.is_some());
+        let error = result.error.unwrap();
+        assert!(
+            error.contains("failed to call model router") || error.contains("Connection refused")
+        );
+    }
+
+    #[test]
+    fn test_receipt_does_not_store_full_prompt() {
+        let (tempdir, store) = create_test_store();
+        let executor = ToolExecutor::new(store, vec![]);
+
+        let mut request = create_allowed_request(ActionKind::ModelChat);
+        request.id = Uuid::new_v4();
+        let mut inputs = BTreeMap::new();
+        inputs.insert(
+            "prompt".to_string(),
+            serde_json::json!("This is a very sensitive prompt that should not be stored"),
+        );
+        request.inputs = inputs;
+
+        let receipt_id = request.id;
+        let decision = create_allowed_decision();
+        let result = executor.execute_authorized(&request, &decision).unwrap();
+
+        // Without model router, execution succeeds with simulated response
+        assert_eq!(result.status, ExecutionStatus::Executed);
+
+        // Read the receipt and verify it doesn't contain full prompt
+        let store = ReceiptStore::new(tempdir.path());
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 1);
+
+        let receipt = store.read(receipt_id).unwrap();
+
+        // The inputs_redacted should NOT contain the full prompt
+        // For ModelChat without router, we get a simulated response
+        // but the inputs are still redacted (no content stored)
+        let inputs_json = serde_json::to_string(&receipt.inputs_redacted).unwrap();
+        assert!(!inputs_json.contains("sensitive prompt"));
     }
 }
