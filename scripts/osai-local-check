@@ -68,22 +68,30 @@ echo ""
 echo "Check 4: osai-agent-cli tool run examples/plans/model-chat.yml"
 
 PLAN_FILE="${REPO_ROOT}/examples/plans/model-chat.yml"
+POLICY_FILE="${REPO_ROOT}/examples/policies/default-secure.yml"
 TOOL_RECEIPTS_DIR="${OSAI_LOCAL_TOOL_RECEIPTS_DIR:-/tmp/osai-tool-receipts}"
 MODEL_RECEIPTS_DIR="${OSAI_LOCAL_MODEL_RECEIPTS_DIR:-/tmp/osai-model-router-receipts}"
 
+# Clear receipts dir so we get fresh receipts from this run
+rm -rf "$TOOL_RECEIPTS_DIR"
 mkdir -p "$TOOL_RECEIPTS_DIR"
 mkdir -p "$MODEL_RECEIPTS_DIR"
 
 cd "$REPO_ROOT"
-OUTPUT=$(cargo run -p osai-agent-cli -- tool run "$PLAN_FILE" 2>&1) || {
-    fail "osai-agent-cli tool run failed: $OUTPUT"
-    OUTPUT=""
-}
+OUTPUT=$(cargo run -p osai-agent-cli -- tool run \
+    --plan "$PLAN_FILE" \
+    --policy "$POLICY_FILE" \
+    --receipts-dir "$TOOL_RECEIPTS_DIR" \
+    --allowed-root "$HOME/Downloads" \
+    --model-router-url "$OSAI_MODEL_ROUTER_URL" 2>&1)
+RESULT=$?
 
-if echo "$OUTPUT" | grep -qiE "(error|failed|panic)"; then
-    fail "osai-agent-cli tool run reported errors"
-else
+if [[ $RESULT -ne 0 ]]; then
+    fail "osai-agent-cli tool run exited with code $RESULT"
+elif echo "$OUTPUT" | grep -q 'execution:.*status=Executed.*action=ModelChat.*error=""'; then
     ok "osai-agent-cli tool run succeeded"
+else
+    fail "osai-agent-cli tool run did not produce expected output"
 fi
 
 # Check 5: Tool receipts exist
