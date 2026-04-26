@@ -1,0 +1,140 @@
+#!/bin/bash
+# OSAI Local Runtime Check - Verify both services and E2E path are working
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/osai-local-env"
+
+FAILURES=0
+
+ok()  { echo "[OK]   $1"; }
+warn() { echo "[WARN] $1"; }
+fail() { echo "[FAIL] $1"; FAILURES=$((FAILURES + 1)); }
+
+echo "=== OSAI Local Runtime Health Check ==="
+echo ""
+
+# Check 1: llama.cpp /models
+echo "Check 1: llama.cpp /v1/models"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    --max-time 10 \
+    -H "Authorization: Bearer ${OSAI_LLAMACPP_API_KEY}" \
+    "${OSAI_LLAMACPP_BASE_URL}/models" 2>&1) || true
+
+if [[ "$HTTP_CODE" == "200" ]]; then
+    ok "llama.cpp /models returned HTTP $HTTP_CODE"
+else
+    fail "llama.cpp /models returned HTTP $HTTP_CODE (expected 200)"
+fi
+
+# Check 2: Model Router /health
+echo ""
+echo "Check 2: Model Router /health"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    --max-time 10 \
+    "${OSAI_MODEL_ROUTER_URL}/health" 2>&1) || true
+
+if [[ "$HTTP_CODE" == "200" ]]; then
+    ok "Model Router /health returned HTTP $HTTP_CODE"
+else
+    fail "Model Router /health returned HTTP $HTTP_CODE (expected 200)"
+fi
+
+# Check 3: Model Router returns non-mock response for local_only
+echo ""
+echo "Check 3: POST /v1/chat/completions (osai-auto local_only, non-mock)"
+
+RESPONSE=$(curl -s --max-time 60 \
+    -H "Content-Type: application/json" \
+    -d '{"model":"osai-auto","messages":[{"role":"user","content":"Hi"}],"metadata":{"privacy":"local_only"}}' \
+    "${OSAI_MODEL_ROUTER_URL}/v1/chat/completions" 2>&1) || true
+
+if echo "$RESPONSE" | grep -q '"choices"'; then
+    # Should NOT contain mock response markers
+    if echo "$RESPONSE" | grep -q "OSAI llama.cpp local mock"; then
+        fail "Model Router returned mock response (OSAI_LOCAL_MOCK=false not active)"
+    else
+        ok "Model Router returned real llama.cpp response"
+    fi
+else
+    fail "Model Router chat/completions failed: $RESPONSE"
+fi
+
+# Check 4: osai-agent CLI tool run through Model Router
+echo ""
+echo "Check 4: osai-agent-cli tool run examples/plans/model-chat.yml"
+
+PLAN_FILE="${REPO_ROOT}/examples/plans/model-chat.yml"
+TOOL_RECEIPTS_DIR="${OSAI_LOCAL_TOOL_RECEIPTS_DIR:-/tmp/osai-tool-receipts}"
+MODEL_RECEIPTS_DIR="${OSAI_LOCAL_MODEL_RECEIPTS_DIR:-/tmp/osai-model-router-receipts}"
+
+mkdir -p "$TOOL_RECEIPTS_DIR"
+mkdir -p "$MODEL_RECEIPTS_DIR"
+
+cd "$REPO_ROOT"
+OUTPUT=$(cargo run -p osai-agent-cli -- tool run "$PLAN_FILE" 2>&1) || {
+    fail "osai-agent-cli tool run failed: $OUTPUT"
+    OUTPUT=""
+}
+
+if echo "$OUTPUT" | grep -qiE "(error|failed|panic)"; then
+    fail "osai-agent-cli tool run reported errors"
+else
+    ok "osai-agent-cli tool run succeeded"
+fi
+
+# Check 5: Tool receipts exist
+echo ""
+echo "Check 5: Tool receipts exist"
+if ls "$TOOL_RECEIPTS_DIR"/*.json 2>/dev/null | head -1 | grep -q ".json"; then
+    ok "Tool receipts found in $TOOL_RECEIPTS_DIR"
+else
+    fail "No tool receipts found in $TOOL_RECEIPTS_DIR"
+fi
+
+# Check 6: Model Router receipts exist
+echo ""
+echo "Check 6: Model Router receipts exist"
+if ls "$MODEL_RECEIPTS_DIR"/*.json 2>/dev/null | head -1 | grep -q ".json"; then
+    ok "Model Router receipts found in $MODEL_RECEIPTS_DIR"
+else
+    warn "No Model Router receipts found in $MODEL_RECEIPTS_DIR (may be OK if receipts not enabled)"
+fi
+
+# Check 7: Secret detection in receipts
+echo ""
+echo "Check 7: Secret detection in receipts"
+
+SECRET_WORDS="password api_key token secret credential"
+FOUND_SECRETS=0
+
+for receipts_dir in "$TOOL_RECEIPTS_DIR" "$MODEL_RECEIPTS_DIR"; do
+    for receipt_file in "$receipts_dir"/*.json; do
+        [[ -f "$receipt_file" ]] || continue
+        for word in $SECRET_WORDS; do
+            if grep -li "$word" "$receipt_file" 2>/dev/null; then
+                warn "Possible secret '$word' found in $(basename "$receipt_file")"
+                FOUND_SECRETS=$((FOUND_SECRETS + 1))
+            fi
+        done
+    done
+done
+
+if [[ $FOUND_SECRETS -eq 0 ]]; then
+    ok "No obvious secrets found in receipts"
+else
+    warn "$FOUND_SECRETS receipt file(s) may contain secrets (manual review recommended)"
+fi
+
+echo ""
+echo "=== Summary ==="
+if [[ $FAILURES -eq 0 ]]; then
+    echo "All required checks passed!"
+    exit 0
+else
+    echo "${FAILURES} required check(s) failed"
+    exit 1
+fi

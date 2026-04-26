@@ -1,0 +1,34 @@
+#!/bin/bash
+# OSAI Local Runtime Down - Stop services started by osai-local-up or systemd
+set -euo pipefail
+
+echo "=== OSAI Local Runtime Down ==="
+echo ""
+
+# Check for systemd user services
+if systemctl --user list-unit-files | grep -q "^osai-model-router.service"; then
+    if systemctl --user is-active --quiet osai-model-router.service 2>/dev/null; then
+        echo "Stopping osai-model-router.service..."
+        systemctl --user stop osai-model-router.service 2>/dev/null || true
+    fi
+fi
+
+if systemctl --user list-unit-files | grep -q "^osai-llamacpp.service"; then
+    if systemctl --user is-active --quiet osai-llamacpp.service 2>/dev/null; then
+        echo "Stopping osai-llamacpp.service..."
+        systemctl --user stop osai-llamacpp.service 2>/dev/null || true
+    fi
+fi
+
+if systemctl --user list-unit-files | grep -q "^osai-vllm.service"; then
+    if systemctl --user is-active --quiet osai-vllm.service 2>/dev/null; then
+        echo "Stopping osai-vllm.service..."
+        systemctl --user stop osai-vllm.service 2>/dev/null || true
+    fi
+fi
+
+echo ""
+echo "Note: If services were started with osai-local-up (foreground),"
+echo "      stop them with Ctrl+C in that terminal."
+echo ""
+echo "Done."

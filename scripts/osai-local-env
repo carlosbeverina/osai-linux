@@ -1,0 +1,36 @@
+#!/bin/bash
+# OSAI Local Runtime Environment
+# Source this script to set up the full local runtime environment.
+# Usage: source scripts/osai-local-env
+
+set -euo pipefail
+
+# Resolve repo root (one level up from scripts/)
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source supporting environments if present
+if [[ -f "${REPO_ROOT}/scripts/osai-llamacpp-env" ]]; then
+    source "${REPO_ROOT}/scripts/osai-llamacpp-env"
+fi
+
+if [[ -f "${REPO_ROOT}/scripts/osai-dev-env" ]]; then
+    source "${REPO_ROOT}/scripts/osai-dev-env"
+fi
+
+# Model Router
+export OSAI_MODEL_ROUTER_URL="${OSAI_MODEL_ROUTER_URL:-http://127.0.0.1:8088}"
+
+# llama.cpp (via osai-llamacpp-env may have set some already; apply defaults here)
+export OSAI_LLAMACPP_BASE_URL="${OSAI_LLAMACPP_BASE_URL:-http://127.0.0.1:8092/v1}"
+export OSAI_LLAMACPP_API_KEY="${OSAI_LLAMACPP_API_KEY:-osai-local-dev-token}"
+export OSAI_LLAMACPP_MODEL="${OSAI_LLAMACPP_MODEL:-qwen2.5-0.5b-instruct-q4_k_m.gguf}"
+export OSAI_LLAMACPP_MODEL_PATH="${OSAI_LLAMACPP_MODEL_PATH:-${REPO_ROOT}/.local-models/llamacpp/qwen2.5-0.5b-instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf}"
+
+# Provider selection
+export OSAI_LOCAL_PROVIDER="${OSAI_LOCAL_PROVIDER:-llamacpp}"
+export OSAI_LOCAL_MOCK="${OSAI_LOCAL_MOCK:-false}"
+export OSAI_MODEL_ROUTER_MOCK_CLOUD="${OSAI_MODEL_ROUTER_MOCK_CLOUD:-true}"
+
+# Receipt directories
+export OSAI_LOCAL_TOOL_RECEIPTS_DIR="${OSAI_LOCAL_TOOL_RECEIPTS_DIR:-/tmp/osai-tool-receipts-llamacpp}"
+export OSAI_LOCAL_MODEL_RECEIPTS_DIR="${OSAI_LOCAL_MODEL_RECEIPTS_DIR:-/tmp/osai-model-router-receipts-llamacpp}"

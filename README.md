@@ -42,6 +42,31 @@ OSAI supports two local model runtimes:
 
 The default provider is **llama.cpp** (set via `OSAI_LOCAL_PROVIDER=llamacpp`).
 
+## Local One-Command Runtime
+
+For development and testing, a single command starts both llama.cpp and Model Router:
+
+```bash
+# Start llama.cpp + Model Router together
+./scripts/osai-local-up
+
+# Run E2E validation
+./scripts/osai-local-check
+
+# Stop (if started with systemd; for foreground, use Ctrl+C)
+./scripts/osai-local-down
+```
+
+This starts:
+- **llama.cpp** on `127.0.0.1:8092` serving a GGUF model
+- **Model Router** on `127.0.0.1:8088` routing to real llama.cpp
+
+The GGUF model must already be present at `.local-models/llamacpp/qwen2.5-0.5b-instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf`. The script does not download models.
+
+Uses **llama.cpp as the laptop default** (no CUDA required for CPU build).
+
+For full validation documentation, see [docs/testing/LLAMACPP_E2E_VALIDATION.md](docs/testing/LLAMACPP_E2E_VALIDATION.md).
+
 ## llama.cpp Local Runtime (Laptop Default)
 
 OSAI uses **llama.cpp** as the default local runtime for laptops and resource-constrained environments. It provides excellent CPU/GPU support with quantized GGUF models.
