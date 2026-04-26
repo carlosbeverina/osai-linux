@@ -65,6 +65,18 @@ source ./scripts/osai-vllm-env
 ./scripts/osai-vllm-down
 ```
 
+### End-to-End Validation
+
+After starting vLLM and Model Router, run the E2E validation:
+
+```bash
+# Assumes vLLM is running at http://127.0.0.1:8091
+# Assumes Model Router is running at http://127.0.0.1:8088
+./scripts/osai-e2e-vllm-check
+```
+
+For full validation instructions, see [docs/testing/VLLM_E2E_VALIDATION.md](docs/testing/VLLM_E2E_VALIDATION.md).
+
 ### Systemd User Service
 
 ```bash

@@ -1,0 +1,245 @@
+#!/bin/bash
+# OSAI vLLM End-to-End Validation Script
+# Validates the full path: vLLM -> Model Router -> osai-agent CLI -> receipts
+set -euo pipefail
+
+# Defaults
+OSAI_VLLM_BASE_URL="${OSAI_VLLM_BASE_URL:-http://127.0.0.1:8091/v1}"
+OSAI_VLLM_API_KEY="${OSAI_VLLM_API_KEY:-osai-local-dev-token}"
+OSAI_MODEL_ROUTER_URL="${OSAI_MODEL_ROUTER_URL:-http://127.0.0.1:8088}"
+OSAI_E2E_MODEL="${OSAI_E2E_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
+OSAI_E2E_TOOL_RECEIPTS_DIR="${OSAI_E2E_TOOL_RECEIPTS_DIR:-/tmp/osai-tool-receipts-vllm}"
+OSAI_E2E_MODEL_RECEIPTS_DIR="${OSAI_E2E_MODEL_RECEIPTS_DIR:-/tmp/osai-model-router-receipts-real-vllm}"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILURES=0
+WARNINGS=0
+
+print_section() {
+    echo ""
+    echo "=== OSAI vLLM E2E Check ==="
+    echo ""
+}
+
+print_ok() {
+    echo "  [OK] $1"
+}
+
+print_warn() {
+    echo "  [WARN] $1"
+    WARNINGS=$((WARNINGS + 1))
+}
+
+print_fail() {
+    echo "  [FAIL] $1"
+    FAILURES=$((FAILURES + 1))
+}
+
+check_vllm() {
+    echo ""
+    echo "-- Checking vLLM at ${OSAI_VLLM_BASE_URL} --"
+
+    # Check vLLM /models endpoint
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+        --max-time 10 \
+        -H "Authorization: Bearer ${OSAI_VLLM_API_KEY}" \
+        "${OSAI_VLLM_BASE_URL}/models" 2>&1) || true
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        print_ok "vLLM /models returned HTTP 200"
+    else
+        print_fail "vLLM /models returned HTTP ${HTTP_CODE}"
+        return 1
+    fi
+}
+
+check_model_router_health() {
+    echo ""
+    echo "-- Checking Model Router at ${OSAI_MODEL_ROUTER_URL} --"
+
+    # Check Model Router /health
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+        --max-time 10 \
+        "${OSAI_MODEL_ROUTER_URL}/health" 2>&1) || true
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        print_ok "Model Router /health returned HTTP 200"
+    else
+        print_fail "Model Router /health returned HTTP ${HTTP_CODE}"
+        return 1
+    fi
+}
+
+check_real_vllm_response() {
+    echo ""
+    echo "-- Checking real vLLM response (not mock) --"
+
+    # Test with osai-auto + local_only to route to vLLM
+    RESPONSE=$(curl -s --max-time 60 \
+        -H "Content-Type: application/json" \
+        -d '{"model":"osai-auto","messages":[{"role":"user","content":"Hi"}],"metadata":{"privacy":"local_only"}}' \
+        "${OSAI_MODEL_ROUTER_URL}/v1/chat/completions" 2>&1) || true
+
+    # Check for mock response
+    if echo "$RESPONSE" | grep -q "OSAI vLLM local mock response"; then
+        print_fail "Model Router returned mock response (OSAI_LOCAL_MOCK=false not set?)"
+        echo "  Response: $RESPONSE"
+        return 1
+    fi
+    print_ok "Model Router returned real response (not mock)"
+
+    # Check if response model contains expected model name
+    if echo "$RESPONSE" | grep -q "${OSAI_E2E_MODEL}"; then
+        print_ok "Response contains expected model: ${OSAI_E2E_MODEL}"
+    else
+        print_warn "Response does not contain expected model: ${OSAI_E2E_MODEL}"
+    fi
+
+    # Check if we got a valid choices array
+    if echo "$RESPONSE" | grep -q '"choices"'; then
+        print_ok "Response contains choices array"
+    else
+        print_fail "Response missing choices array"
+        return 1
+    fi
+}
+
+run_cli_tool_run() {
+    echo ""
+    echo "-- Running osai-agent-cli tool run --"
+    echo "  Plan: examples/plans/model-chat.yml"
+    echo "  Policy: examples/policies/default-secure.yml"
+    echo "  Receipts: ${OSAI_E2E_TOOL_RECEIPTS_DIR}"
+
+    # Clean up old receipts
+    rm -rf "${OSAI_E2E_TOOL_RECEIPTS_DIR}"
+    mkdir -p "${OSAI_E2E_TOOL_RECEIPTS_DIR}"
+
+    # Run CLI tool run
+    cd "${REPO_ROOT}"
+    if cargo run -p osai-agent-cli -- tool run \
+        --plan examples/plans/model-chat.yml \
+        --policy examples/policies/default-secure.yml \
+        --receipts-dir "${OSAI_E2E_TOOL_RECEIPTS_DIR}" \
+        --allowed-root "${HOME}/Downloads" \
+        --model-router-url "${OSAI_MODEL_ROUTER_URL}" 2>&1 | tee /tmp/osai-e2e-cli-output.txt; then
+        print_ok "CLI tool run completed"
+    else
+        print_fail "CLI tool run failed"
+        cat /tmp/osai-e2e-cli-output.txt
+        return 1
+    fi
+
+    # Check CLI output for success indicators
+    if grep -q "execution: status=Executed action=ModelChat error=\"\"" /tmp/osai-e2e-cli-output.txt; then
+        print_ok "CLI output contains success indicators"
+    else
+        print_warn "CLI output does not contain expected success indicators"
+    fi
+}
+
+check_tool_receipts() {
+    echo ""
+    echo "-- Checking tool receipts --"
+
+    RECEIPT_COUNT=$(find "${OSAI_E2E_TOOL_RECEIPTS_DIR}" -name "*.json" 2>/dev/null | wc -l)
+
+    if [[ $RECEIPT_COUNT -gt 0 ]]; then
+        print_ok "Tool receipts exist: ${RECEIPT_COUNT} file(s)"
+
+        # Check for obvious secrets in receipts
+        SECRET_FOUND=false
+        for receipt in "${OSAI_E2E_TOOL_RECEIPTS_DIR}"/*.json; do
+            if [[ -f "$receipt" ]]; then
+                if grep -iqE "password|api_key|token|secret|credential" "$receipt" 2>/dev/null; then
+                    SECRET_FOUND=true
+                    break
+                fi
+            fi
+        done
+
+        if [[ "$SECRET_FOUND" == "true" ]]; then
+            print_warn "Tool receipts contain possible secret terms (review recommended)"
+        else
+            print_ok "Tool receipts do not contain obvious secret terms"
+        fi
+    else
+        print_fail "No tool receipts found in ${OSAI_E2E_TOOL_RECEIPTS_DIR}"
+        return 1
+    fi
+}
+
+check_model_receipts() {
+    echo ""
+    echo "-- Checking model router receipts (if exists) --"
+
+    if [[ -d "${OSAI_E2E_MODEL_RECEIPTS_DIR}" ]]; then
+        RECEIPT_COUNT=$(find "${OSAI_E2E_MODEL_RECEIPTS_DIR}" -name "*.json" 2>/dev/null | wc -l)
+        if [[ $RECEIPT_COUNT -gt 0 ]]; then
+            print_ok "Model router receipts exist: ${RECEIPT_COUNT} file(s)"
+
+            # Check for obvious secrets
+            SECRET_FOUND=false
+            for receipt in "${OSAI_E2E_MODEL_RECEIPTS_DIR}"/*.json; do
+                if [[ -f "$receipt" ]]; then
+                    if grep -iqE "password|api_key|token|secret|credential" "$receipt" 2>/dev/null; then
+                        SECRET_FOUND=true
+                        break
+                    fi
+                fi
+            done
+
+            if [[ "$SECRET_FOUND" == "true" ]]; then
+                print_warn "Model receipts contain possible secret terms (review recommended)"
+            else
+                print_ok "Model receipts do not contain obvious secret terms"
+            fi
+        else
+            print_warn "Model receipts dir exists but is empty"
+        fi
+    else
+        print_warn "Model receipts dir does not exist (OSAI_RECEIPTS_DIR not set during test)"
+    fi
+}
+
+print_summary() {
+    echo ""
+    echo "=== Summary ==="
+    echo "Failures: ${FAILURES}"
+    echo "Warnings: ${WARNINGS}"
+    echo ""
+
+    if [[ $FAILURES -eq 0 ]]; then
+        echo "Result: PASS"
+        return 0
+    else
+        echo "Result: FAIL"
+        return 1
+    fi
+}
+
+main() {
+    print_section
+
+    # Check vLLM
+    check_vllm || true
+
+    # Check Model Router health
+    check_model_router_health || true
+
+    # Check real vLLM response
+    check_real_vllm_response || true
+
+    # Run CLI tool run
+    run_cli_tool_run || true
+
+    # Check receipts
+    check_tool_receipts || true
+    check_model_receipts || true
+
+    # Print summary
+    print_summary
+}
+
+main
