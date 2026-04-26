@@ -1,26 +1,37 @@
-"""Model providers for OSAI Model Router."""
+"""Model providers for OSAI Model Router.
+
+Supports:
+- MiniMax (cloud) via OpenAI-compatible API
+- vLLM (local) via OpenAI-compatible API
+"""
 
 import re
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Any
+from typing import Optional
 
 import httpx
 
-from .schemas import ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Choice, Usage
+from .schemas import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    Choice,
+    ChatMessage,
+    Usage,
+)
 
 
-@dataclass
 class NormalizedOutput:
-    """Result of output normalization."""
-    content: str
-    reasoning_stripped: bool
-    was_empty: bool
+    """Result of normalizing model output."""
+
+    def __init__(self, content: str, reasoning_stripped: bool, was_empty: bool):
+        self.content = content
+        self.reasoning_stripped = reasoning_stripped
+        self.was_empty = was_empty
 
 
 def strip_thinking_blocks(content: str) -> NormalizedOutput:
-    """Remove <think>...</think> blocks from content.
+    """Strip <think>...</think> thinking blocks from content.
 
     Handles both complete and incomplete thinking blocks:
     - Complete blocks: <think> ...text...</think> -> removed
@@ -81,24 +92,52 @@ class BaseProvider(ABC):
         ...
 
 
-class LocalMockProvider(BaseProvider):
-    """Mock provider for local models.
+class VllmProvider(BaseProvider):
+    """vLLM local model provider.
 
-    Returns deterministic content without calling Ollama.
+    Uses OpenAI-compatible API endpoint.
+    Supports mock mode for development/testing.
     """
 
+    # Default max_tokens when not specified by user
+    DEFAULT_MAX_TOKENS = 1024
+
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8091/v1",
+        api_key: str = "osai-local-dev-token",
+        default_model: str = "gemma-local",
+        mock_mode: bool = True
+    ):
+        """Initialize vLLM provider."""
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.default_model = default_model
+        self.mock_mode = mock_mode
+
     def generate(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
-        """Generate a mock response for local models."""
+        """Generate a response via vLLM API.
+
+        Returns:
+            Tuple of (response, reasoning_stripped)
+        """
+        if self.mock_mode:
+            return self._mock_response(routed_model, request)
+
+        return self._real_request(request, routed_model)
+
+    def _mock_response(self, model: str, request: ChatCompletionRequest) -> tuple[ChatCompletionResponse, bool]:
+        """Return mock response for local vLLM testing."""
         response = ChatCompletionResponse(
-            id=f"osai-local-{int(time.time() * 1000)}",
+            id=f"osai-vllm-{int(time.time() * 1000)}",
             created=int(time.time()),
-            model=routed_model,
+            model=model,
             choices=[
                 Choice(
                     index=0,
                     message=ChatMessage(
                         role="assistant",
-                        content=f"OSAI local mock response (model: {routed_model})"
+                        content=f"OSAI vLLM local mock response (model: {model})"
                     ),
                     finish_reason="stop"
                 )
@@ -110,6 +149,59 @@ class LocalMockProvider(BaseProvider):
             )
         )
         return response, False
+
+    def _real_request(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
+        """Make real request to vLLM API (not called in tests)."""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": routed_model,
+            "messages": [{"role": m.role, "content": m.content} for m in request.messages],
+        }
+
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
+
+        # Apply default max_tokens if not specified
+        max_tokens = request.max_tokens if request.max_tokens is not None else self.DEFAULT_MAX_TOKENS
+        payload["max_tokens"] = max_tokens
+
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        # Normalize the output to strip thinking blocks
+        normalized = strip_thinking_blocks(data["choices"][0]["message"]["content"])
+        finish_reason = data["choices"][0]["finish_reason"]
+
+        return ChatCompletionResponse(
+            id=data["id"],
+            created=data["created"],
+            model=data["model"],
+            choices=[
+                Choice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=normalized.content
+                    ),
+                    finish_reason=finish_reason
+                )
+            ],
+            usage=Usage(
+                prompt_tokens=data["usage"]["prompt_tokens"],
+                completion_tokens=data["usage"]["completion_tokens"],
+                total_tokens=data["usage"]["total_tokens"]
+            )
+        ), normalized.reasoning_stripped
 
 
 class MiniMaxProvider(BaseProvider):

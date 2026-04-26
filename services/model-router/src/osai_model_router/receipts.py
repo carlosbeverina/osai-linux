@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .config import config
 
@@ -32,6 +33,22 @@ class ReceiptWriter:
         """Set override receipts directory."""
         self._override_dir = value
 
+    def _get_local_provider_info(self) -> dict[str, Any]:
+        """Get local provider information for receipt.
+
+        Returns:
+            Dict with local_provider, local_mock, and local_base_url_host
+        """
+        # Extract just the host from the vLLM base URL
+        parsed = urlparse(config.osai_vllm_base_url)
+        host_only = parsed.hostname or "unknown"
+
+        return {
+            "local_provider": config.osai_local_provider,
+            "local_mock": config.osai_local_mock,
+            "local_base_url_host": host_only
+        }
+
     def write_receipt(
         self,
         request_id: str,
@@ -49,7 +66,7 @@ class ReceiptWriter:
 
         Args:
             request_id: Unique request identifier
-            selected_provider: Provider that handled the request
+            selected_provider: Provider that handled the request (VllmProvider or MiniMaxProvider)
             requested_model: Model requested by client
             routed_model: Model actually used for routing
             messages: List of message dicts (roles only, content summarized)
@@ -71,6 +88,9 @@ class ReceiptWriter:
             complexity = metadata.get("complexity")
             speed = metadata.get("speed")
 
+        # Get local provider info
+        local_info = self._get_local_provider_info()
+
         receipt = {
             "id": request_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -88,7 +108,11 @@ class ReceiptWriter:
                 "roles": list(set(m.get("role", "") for m in messages))
             },
             "reasoning_stripped": reasoning_stripped,
-            "truncated": truncated
+            "truncated": truncated,
+            # Local provider info
+            "local_provider": local_info["local_provider"],
+            "local_mock": local_info["local_mock"],
+            "local_base_url_host": local_info["local_base_url_host"]
         }
 
         if error:

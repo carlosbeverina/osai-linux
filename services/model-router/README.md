@@ -6,8 +6,19 @@ OpenAI-compatible API gateway that routes LLM requests to local or cloud provide
 
 Model Router is an OSAI service that provides a unified OpenAI-compatible API endpoint (`/v1/chat/completions`) and intelligently routes requests to:
 
-- **Local models** (Gemma 4 variants) via mock provider
+- **Local models** (Gemma 4 variants) via vLLM
 - **Cloud models** (MiniMax) via MiniMax API
+
+## Architecture Decision: vLLM over Ollama
+
+OSAI uses **vLLM** as the primary local model backend, not Ollama. Reasons:
+
+1. **OpenAI compatibility** - vLLM provides OpenAI-compatible API out of the box
+2. **Performance** - vLLM is optimized for high-throughput serving
+3. **Simplicity** - Single API format for both local and cloud (OpenAI-compatible)
+4. **Future-proof** - Better suited for production deployment
+
+Note: llama.cpp may be added later as a fallback for resource-constrained environments.
 
 ## Why Separate Routing from Agents?
 
@@ -23,11 +34,12 @@ OSAI separates model routing from agent execution for several architectural reas
 
 ### Local Models (osai-local, gemma4:*)
 
-- Processed by `LocalMockProvider` (Ollama integration planned)
+- Processed by `VllmProvider` via vLLM OpenAI-compatible API
 - Zero API cost
 - Full privacy (no data leaves the machine)
 - Lower latency for simple tasks
-- Mock responses in v0.1 MVP
+- **Mock mode** (default): Returns simulated responses without calling vLLM
+- **Real mode**: Calls vLLM server at `OSAI_VLLM_BASE_URL`
 
 ### Cloud Models (MiniMax-M2.7, MiniMax-M2.7-highspeed)
 
@@ -35,6 +47,7 @@ OSAI separates model routing from agent execution for several architectural reas
 - Requires `MINIMAX_API_KEY`
 - Higher capability for complex reasoning
 - Network latency involved
+- **Mock mode** (default): Returns simulated responses without calling MiniMax
 
 ### Auto-Routing (osai-auto)
 
@@ -42,10 +55,57 @@ The `osai-auto` model uses metadata hints to route intelligently:
 
 | Metadata | Route |
 |----------|-------|
-| `privacy: "local_only"` | Local (gemma4:e4b) |
+| `privacy: "local_only"` | Local vLLM |
 | `complexity: "high"` | Cloud (MiniMax-M2.7) |
 | `speed: "fast"` | Fast cloud (MiniMax-M2.7-highspeed) |
-| (none) | Local (gemma4:e4b) |
+| (none) | Local vLLM |
+
+## Local vLLM Configuration
+
+Configure via environment variables or `.env` file:
+
+```bash
+# Provider type (currently only vllm is supported)
+OSAI_LOCAL_PROVIDER=vllm
+
+# Mock local responses (true for testing/development)
+OSAI_LOCAL_MOCK=true
+
+# vLLM OpenAI-compatible base URL (must be loopback only)
+OSAI_VLLM_BASE_URL=http://127.0.0.1:8091/v1
+
+# Default model served by vLLM
+OSAI_VLLM_MODEL=gemma-local
+
+# API key for vLLM
+OSAI_VLLM_API_KEY=osai-local-dev-token
+```
+
+**Security**: vLLM base URL must be loopback-only (localhost or 127.0.0.1). External URLs are rejected.
+
+## Running vLLM Server
+
+When ready to use real local models:
+
+```bash
+# Start vLLM serving a model
+vllm serve <model_name> \
+    --host 127.0.0.1 \
+    --port 8091 \
+    --api-key osai-local-dev-token
+
+# Example with Gemma
+vllm serve gemma-4-e4b \
+    --host 127.0.0.1 \
+    --port 8091 \
+    --api-key osai-local-dev-token
+```
+
+Then disable mock mode:
+
+```bash
+OSAI_LOCAL_MOCK=false python -m osai_model_router.main
+```
 
 ## MiniMax Configuration
 
@@ -65,10 +125,14 @@ MINIMAX_FAST_MODEL=MiniMax-M2.7-highspeed
 For testing and development without API calls:
 
 ```bash
+# Mock local vLLM responses (default: true)
+OSAI_LOCAL_MOCK=true
+
+# Mock cloud MiniMax responses (default: true)
 OSAI_MODEL_ROUTER_MOCK_CLOUD=true
 ```
 
-When `true`, cloud model requests return mock responses without calling the MiniMax API.
+When `true`, requests return mock responses without calling the actual provider.
 
 ## Receipts
 
@@ -78,49 +142,32 @@ Every chat completion request writes a JSON receipt to:
 - Otherwise `~/.local/share/osai/receipts/model-router/`
 
 Receipts include:
-- Request ID, timestamp, provider
-- Model routing decisions (requested_model, routed_model)
-- Privacy/complexity/speed metadata from request
-- `reasoning_stripped`: Whether hidden thinking blocks were removed
-- `truncated`: Whether response was truncated due to max_tokens
+
+- Request ID, timestamp, service name
+- Selected provider (`VllmProvider` or `MiniMaxProvider`)
+- Requested model and routed model
+- Privacy, complexity, speed metadata hints
 - Status (executed/failed)
-- **Never** the full prompt content
-- **Never** the raw model output
+- Input summary (message count, roles) - **no prompt content**
+- Reasoning stripped flag
+- Truncated flag
+- Local provider info (provider type, mock mode, base URL host)
 
-### What Receipts Do NOT Store
+Receipts **never** contain:
+- Full prompts or message content
+- API keys
+- Raw model responses
 
-For security and privacy:
-- Full prompts or message content are never stored
-- Raw model responses are never stored
-- Only message count and roles are recorded
-- API keys are never logged or stored
+## Receipt Fields
 
-## Response Normalization
-
-MiniMax models may include hidden "thinking" blocks (<think>...</think>) in their responses. These are automatically stripped before the response is returned to clients.
-
-### How It Works
-
-1. Complete <think>...</think> blocks are removed
-2. Incomplete <think> blocks (at end of response) are removed
-3. Content is trimmed of leading/trailing whitespace
-4. If all content was thinking blocks, a fallback message is returned
-
-### Fallback Behavior
-
-If a response contains only hidden reasoning and no visible answer, the router returns:
-
-```
-"The model response contained only hidden reasoning and no visible answer."
-```
-
-The receipt will have `reasoning_stripped: true` and `truncated: false`.
-
-## Default max_tokens
-
-When calling MiniMax models, if `max_tokens` is not specified in the request, the router uses a safe default of 1024 tokens. User-provided `max_tokens` values are always preserved.
-
-If the response is truncated due to `max_tokens`, the receipt will have `truncated: true`.
+| Field | Description |
+|-------|-------------|
+| `selected_provider` | `VllmProvider` or `MiniMaxProvider` |
+| `local_provider` | `vllm` (for VllmProvider routes) |
+| `local_mock` | `true` if local vLLM is mocked |
+| `local_base_url_host` | Host of vLLM URL (e.g., `127.0.0.1`) |
+| `routed_model` | Actual model used (may differ from requested) |
+| `input_summary` | Message count and roles only |
 
 ## Running Locally
 
@@ -135,7 +182,7 @@ pip install -e ".[dev]"
 ### Run
 
 ```bash
-# With mock cloud (default)
+# With mock providers (default)
 uvicorn osai_model_router.main:app --host 127.0.0.1 --port 8088
 
 # Or run directly
@@ -181,6 +228,8 @@ journalctl --user -u osai-model-router -f
 pytest tests/
 ```
 
+**Note**: Tests do not call real vLLM or MiniMax endpoints. All external calls are mocked.
+
 ## API Examples
 
 ### Health Check
@@ -224,6 +273,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 - **Do not store raw model outputs** - Only metadata about the response is stored
 - **Do not log API keys** - Keys are never written to logs or receipts
 - **Bind to localhost only** - Service listens on 127.0.0.1 only
+- **vLLM URL must be loopback** - External vLLM URLs are rejected
 - **Do not commit secrets** - Use `.env` files excluded from version control
 - **Strip thinking blocks** - Hidden reasoning is removed before returning responses
 
@@ -237,11 +287,11 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 ## Available Models
 
-- `osai-local` - Local default (gemma4:e4b)
+- `osai-local` - Local default (resolves to `OSAI_VLLM_MODEL`)
 - `osai-cloud` - Cloud default (MiniMax-M2.7)
 - `osai-auto` - Auto-route based on metadata
-- `gemma4:e2b` - Gemma 4 E2B local
-- `gemma4:e4b` - Gemma 4 E4B local
-- `gemma4:26b` - Gemma 4 26B local
+- `gemma4:e2b` - Gemma 4 E2B local (direct pass-through to vLLM)
+- `gemma4:e4b` - Gemma 4 E4B local (direct pass-through to vLLM)
+- `gemma4:26b` - Gemma 4 26B local (direct pass-through to vLLM)
 - `MiniMax-M2.7` - MiniMax standard
 - `MiniMax-M2.7-highspeed` - MiniMax fast variant

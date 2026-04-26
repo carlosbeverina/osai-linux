@@ -6,6 +6,7 @@ Supports optional .env file via python-dotenv.
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Try to load .env file if python-dotenv is available
 try:
@@ -29,6 +30,20 @@ class Config:
     # Mock mode for cloud provider
     osai_mock_cloud: bool = os.getenv("OSAI_MODEL_ROUTER_MOCK_CLOUD", "true").lower() == "true"
 
+    # Local vLLM Configuration
+    # OSAI_LOCAL_PROVIDER: vllm (only vllm for now)
+    osai_local_provider: str = os.getenv("OSAI_LOCAL_PROVIDER", "vllm")
+    # OSAI_LOCAL_MOCK: true for mock mode, false for real vLLM calls
+    osai_local_mock: bool = os.getenv("OSAI_LOCAL_MOCK", "true").lower() == "true"
+    # OSAI_VLLM_BASE_URL: vLLM OpenAI-compatible base URL
+    osai_vllm_base_url: str = os.getenv(
+        "OSAI_VLLM_BASE_URL", "http://127.0.0.1:8091/v1"
+    )
+    # OSAI_VLLM_MODEL: default model served by vLLM
+    osai_vllm_model: str = os.getenv("OSAI_VLLM_MODEL", "gemma-local")
+    # OSAI_VLLM_API_KEY: API key for vLLM
+    osai_vllm_api_key: str = os.getenv("OSAI_VLLM_API_KEY", "osai-local-dev-token")
+
     # Receipts directory
     receipts_dir: Path = Path(
         os.getenv("OSAI_RECEIPTS_DIR", "")
@@ -42,6 +57,34 @@ class Config:
     def ensure_receipts_dir(self) -> None:
         """Ensure receipts directory exists."""
         self.receipts_dir.mkdir(parents=True, exist_ok=True)
+
+    def is_loopback_url(self, url: str) -> bool:
+        """Check if URL is loopback-only (localhost or 127.0.0.1).
+
+        Args:
+            url: URL to validate
+
+        Returns:
+            True if URL is loopback-only
+        """
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if host in ("localhost", "127.0.0.1"):
+            return True
+        return False
+
+    def validate_vllm_url(self) -> tuple[bool, str]:
+        """Validate vLLM base URL is loopback and http.
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        parsed = urlparse(self.osai_vllm_base_url)
+        if parsed.scheme != "http":
+            return False, f"vLLM URL must use http:// scheme, got {parsed.scheme}://"
+        if parsed.hostname not in ("localhost", "127.0.0.1"):
+            return False, f"vLLM URL must be loopback (localhost or 127.0.0.1), got {parsed.hostname}"
+        return True, ""
 
 
 # Global config instance

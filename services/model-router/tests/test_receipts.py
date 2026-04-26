@@ -102,6 +102,29 @@ def test_receipts_contain_routing_metadata(client_with_receipts):
     assert "selected_provider" in receipt
 
 
+def test_receipts_include_local_provider(client_with_receipts):
+    """Test that receipts include local_provider and local_mock."""
+    client, receipts_dir = client_with_receipts
+
+    response = client.post("/v1/chat/completions", json={
+        "model": "osai-local",
+        "messages": [{"role": "user", "content": "Hello"}]
+    })
+    assert response.status_code == 200
+
+    receipt_files = list(receipts_dir.glob("*.json"))
+    with open(receipt_files[0]) as f:
+        receipt = json.load(f)
+
+    # Check local provider info
+    assert "local_provider" in receipt
+    assert "local_mock" in receipt
+    assert "local_base_url_host" in receipt
+    assert receipt["local_provider"] == "vllm"
+    assert receipt["local_mock"] is True  # Default is mock mode
+    assert receipt["local_base_url_host"] == "127.0.0.1"
+
+
 def test_failed_request_writes_receipt(client_with_receipts):
     """Test that failed requests write receipts with error."""
     client, receipts_dir = client_with_receipts
@@ -136,3 +159,25 @@ def test_multiple_requests_write_multiple_receipts(client_with_receipts):
 
     receipt_files = list(receipts_dir.glob("*.json"))
     assert len(receipt_files) == 3
+
+
+def test_minimax_receipt_includes_provider_info(client_with_receipts):
+    """Test that minimax receipts also include local_provider info."""
+    client, receipts_dir = client_with_receipts
+
+    response = client.post("/v1/chat/completions", json={
+        "model": "MiniMax-M2.7",
+        "messages": [{"role": "user", "content": "Hello"}]
+    })
+    assert response.status_code == 200
+
+    receipt_files = list(receipts_dir.glob("*.json"))
+    with open(receipt_files[0]) as f:
+        receipt = json.load(f)
+
+    # Should have selected_provider as MiniMaxProvider
+    assert receipt["selected_provider"] == "MiniMaxProvider"
+    # But local_provider info is still present
+    assert "local_provider" in receipt
+    assert "local_mock" in receipt
+    assert "local_base_url_host" in receipt
