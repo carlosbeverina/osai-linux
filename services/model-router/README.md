@@ -290,6 +290,9 @@ Receipts **never** contain:
 | `local_base_url_host` | Host of local provider URL (e.g., `127.0.0.1`) |
 | `routed_model` | Actual model used (may differ from requested) |
 | `input_summary` | Message count and roles only |
+| `reasoning_stripped` | `true` if thinking blocks were removed |
+| `was_empty_after_normalization` | `true` if content was empty after stripping |
+| `truncated` | `true` if response was truncated due to max_tokens |
 
 ## Running Locally
 
@@ -398,6 +401,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 - **vLLM URL must be loopback** - External vLLM URLs are rejected
 - **Do not commit secrets** - Use `.env` files excluded from version control
 - **Strip thinking blocks** - Hidden reasoning is removed before returning responses
+- **Gemma-style reasoning models** - May need higher `max_tokens`; Model Router strips hidden reasoning blocks from local responses
 
 ## Endpoints
 

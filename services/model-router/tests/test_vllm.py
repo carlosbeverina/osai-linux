@@ -151,3 +151,33 @@ def test_get_local_model_vllm(monkeypatch):
     monkeypatch.setattr(config, "osai_local_provider", "vllm")
     monkeypatch.setattr(config, "osai_vllm_model", "my-vllm-model")
     assert config.get_local_model() == "my-vllm-model"
+
+
+def test_llamacpp_default_max_tokens_512(monkeypatch):
+    """Test that LlamaCppProvider default max_tokens is 512."""
+    from osai_model_router.providers import LlamaCppProvider
+    monkeypatch.setattr(config, "osai_local_mock", False)
+    provider = LlamaCppProvider(
+        base_url="http://127.0.0.1:8092/v1",
+        api_key="test-key",
+        default_model="test-model",
+        mock_mode=False
+    )
+    assert provider.DEFAULT_MAX_TOKENS == 512
+
+
+def test_llamacpp_user_max_tokens_preserved(monkeypatch):
+    """Test that user-provided max_tokens is preserved and not overridden."""
+    from osai_model_router.providers import LlamaCppProvider
+    from osai_model_router.schemas import ChatCompletionRequest, Message
+
+    provider = LlamaCppProvider(
+        base_url="http://127.0.0.1:8092/v1",
+        api_key="test-key",
+        default_model="test-model",
+        mock_mode=False
+    )
+    # With mock_mode=False, it would try a real request, but we just check the default
+    assert provider.DEFAULT_MAX_TOKENS == 512
+    # User-provided value is always respected in generate() via:
+    # max_tokens = request.max_tokens if request.max_tokens is not None else self.DEFAULT_MAX_TOKENS

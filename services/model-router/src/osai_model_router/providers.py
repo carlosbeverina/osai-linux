@@ -83,11 +83,11 @@ class BaseProvider(ABC):
     """Base class for model providers."""
 
     @abstractmethod
-    def generate(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
+    def generate(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool, bool]:
         """Generate a chat completion response.
 
         Returns:
-            Tuple of (response, reasoning_stripped)
+            Tuple of (response, reasoning_stripped, was_empty_after_normalization)
         """
         ...
 
@@ -115,18 +115,18 @@ class VllmProvider(BaseProvider):
         self.default_model = default_model
         self.mock_mode = mock_mode
 
-    def generate(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
+    def generate(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool, bool]:
         """Generate a response via vLLM API.
 
         Returns:
-            Tuple of (response, reasoning_stripped)
+            Tuple of (response, reasoning_stripped, was_empty_after_normalization)
         """
         if self.mock_mode:
             return self._mock_response(routed_model, request)
 
         return self._real_request(request, routed_model)
 
-    def _mock_response(self, model: str, request: ChatCompletionRequest) -> tuple[ChatCompletionResponse, bool]:
+    def _mock_response(self, model: str, request: ChatCompletionRequest) -> tuple[ChatCompletionResponse, bool, bool]:
         """Return mock response for local vLLM testing."""
         response = ChatCompletionResponse(
             id=f"osai-vllm-{int(time.time() * 1000)}",
@@ -148,9 +148,9 @@ class VllmProvider(BaseProvider):
                 total_tokens=len(str(request.messages)) + 10
             )
         )
-        return response, False
+        return response, False, False
 
-    def _real_request(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
+    def _real_request(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool, bool]:
         """Make real request to vLLM API (not called in tests)."""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -201,7 +201,7 @@ class VllmProvider(BaseProvider):
                 completion_tokens=data["usage"]["completion_tokens"],
                 total_tokens=data["usage"]["total_tokens"]
             )
-        ), normalized.reasoning_stripped
+        ), normalized.reasoning_stripped, normalized.was_empty
 
 
 class MiniMaxProvider(BaseProvider):
@@ -227,18 +227,18 @@ class MiniMaxProvider(BaseProvider):
         self.default_model = default_model
         self.mock_mode = mock_mode
 
-    def generate(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
+    def generate(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool, bool]:
         """Generate a response via MiniMax API.
 
         Returns:
-            Tuple of (response, reasoning_stripped)
+            Tuple of (response, reasoning_stripped, was_empty_after_normalization)
         """
         if self.mock_mode:
             return self._mock_response(routed_model, request)
 
         return self._real_request(request, routed_model)
 
-    def _mock_response(self, model: str, request: ChatCompletionRequest) -> tuple[ChatCompletionResponse, bool]:
+    def _mock_response(self, model: str, request: ChatCompletionRequest) -> tuple[ChatCompletionResponse, bool, bool]:
         """Return mock response for testing."""
         response = ChatCompletionResponse(
             id=f"osai-minimax-{int(time.time() * 1000)}",
@@ -260,9 +260,9 @@ class MiniMaxProvider(BaseProvider):
                 total_tokens=len(str(request.messages)) + 12
             )
         )
-        return response, False
+        return response, False, False
 
-    def _real_request(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
+    def _real_request(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool, bool]:
         """Make real request to MiniMax API (not called in tests)."""
         if not self.api_key:
             raise ValueError("MINIMAX_API_KEY is not configured")
@@ -316,7 +316,7 @@ class MiniMaxProvider(BaseProvider):
                 completion_tokens=data["usage"]["completion_tokens"],
                 total_tokens=data["usage"]["total_tokens"]
             )
-        ), normalized.reasoning_stripped
+        ), normalized.reasoning_stripped, normalized.was_empty
 
 
 class LlamaCppProvider(BaseProvider):
@@ -326,8 +326,8 @@ class LlamaCppProvider(BaseProvider):
     Supports mock mode for development/testing.
     """
 
-    # Default max_tokens when not specified by user
-    DEFAULT_MAX_TOKENS = 1024
+    # Default max_tokens when not specified by user (safer for Gemma-style reasoning models)
+    DEFAULT_MAX_TOKENS = 512
 
     def __init__(
         self,
@@ -342,18 +342,18 @@ class LlamaCppProvider(BaseProvider):
         self.default_model = default_model
         self.mock_mode = mock_mode
 
-    def generate(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
+    def generate(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool, bool]:
         """Generate a response via llama.cpp API.
 
         Returns:
-            Tuple of (response, reasoning_stripped)
+            Tuple of (response, reasoning_stripped, was_empty_after_normalization)
         """
         if self.mock_mode:
             return self._mock_response(routed_model, request)
 
         return self._real_request(request, routed_model)
 
-    def _mock_response(self, model: str, request: ChatCompletionRequest) -> tuple[ChatCompletionResponse, bool]:
+    def _mock_response(self, model: str, request: ChatCompletionRequest) -> tuple[ChatCompletionResponse, bool, bool]:
         """Return mock response for local llama.cpp testing."""
         response = ChatCompletionResponse(
             id=f"osai-llamacpp-{int(time.time() * 1000)}",
@@ -375,9 +375,9 @@ class LlamaCppProvider(BaseProvider):
                 total_tokens=len(str(request.messages)) + 10
             )
         )
-        return response, False
+        return response, False, False
 
-    def _real_request(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
+    def _real_request(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool, bool]:
         """Make real request to llama.cpp API (not called in tests)."""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -428,4 +428,4 @@ class LlamaCppProvider(BaseProvider):
                 completion_tokens=data["usage"]["completion_tokens"],
                 total_tokens=data["usage"]["total_tokens"]
             )
-        ), normalized.reasoning_stripped
+        ), normalized.reasoning_stripped, normalized.was_empty

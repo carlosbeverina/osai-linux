@@ -51,7 +51,7 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
 
     try:
         # Route the request
-        response, provider_name, routed_model, reasoning_stripped = router_instance.route(request)
+        response, provider_name, routed_model, reasoning_stripped, was_empty = router_instance.route(request)
 
         # Determine if response was truncated
         truncated = response.choices[0].finish_reason == "length" if response.choices else False
@@ -67,7 +67,8 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
             status="executed",
             metadata=request.metadata,
             reasoning_stripped=reasoning_stripped,
-            truncated=truncated
+            truncated=truncated,
+            was_empty_after_normalization=was_empty
         )
 
         return response

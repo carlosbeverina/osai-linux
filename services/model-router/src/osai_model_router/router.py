@@ -71,14 +71,14 @@ class ModelRouter:
     def route(
         self,
         request: ChatCompletionRequest
-    ) -> tuple[ChatCompletionResponse, str, str, bool]:
+    ) -> tuple[ChatCompletionResponse, str, str, bool, bool]:
         """Route a chat completion request to the appropriate provider.
 
         Args:
             request: Chat completion request
 
         Returns:
-            Tuple of (response, provider_name, routed_model, reasoning_stripped)
+            Tuple of (response, provider_name, routed_model, reasoning_stripped, was_empty_after_normalization)
 
         Raises:
             ValueError: If model is unknown or API key is missing
@@ -90,12 +90,12 @@ class ModelRouter:
         target_model, provider = self._get_provider_for_model(model, metadata)
 
         # Generate response
-        response, reasoning_stripped = provider.generate(request, target_model)
+        response, reasoning_stripped, was_empty = provider.generate(request, target_model)
 
         # Provider name is 'LlamaCppProvider', 'VllmProvider', or 'MiniMaxProvider'
         provider_name = provider.__class__.__name__
 
-        return response, provider_name, target_model, reasoning_stripped
+        return response, provider_name, target_model, reasoning_stripped, was_empty
 
     def _get_provider_for_model(
         self,

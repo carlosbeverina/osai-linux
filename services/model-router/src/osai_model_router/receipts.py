@@ -63,7 +63,8 @@ class ReceiptWriter:
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
         reasoning_stripped: bool = False,
-        truncated: bool = False
+        truncated: bool = False,
+        was_empty_after_normalization: bool = False
     ) -> Path:
         """Write a receipt for a chat completion request.
 
@@ -78,6 +79,7 @@ class ReceiptWriter:
             metadata: Request metadata including privacy, complexity, speed hints
             reasoning_stripped: Whether thinking blocks were stripped from response
             truncated: Whether response was truncated due to max_tokens
+            was_empty_after_normalization: Whether content was empty after normalization (used fallback)
 
         Returns:
             Path to the written receipt file
@@ -112,6 +114,7 @@ class ReceiptWriter:
             },
             "reasoning_stripped": reasoning_stripped,
             "truncated": truncated,
+            "was_empty_after_normalization": was_empty_after_normalization,
             # Local provider info
             "local_provider": local_info["local_provider"],
             "local_mock": local_info["local_mock"],
