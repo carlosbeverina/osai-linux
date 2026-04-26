@@ -1,0 +1,39 @@
+#!/bin/bash
+# OSAI vLLM Up - Start vLLM local runtime
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Load vLLM environment
+source "${SCRIPT_DIR}/osai-vllm-env"
+
+# Check if vllm command is available
+if ! command -v vllm &> /dev/null; then
+    echo "Error: vllm command not found"
+    echo ""
+    echo "Create a vLLM environment and install vLLM before running this script."
+    echo ""
+    echo "To create a vLLM environment:"
+    echo "  python3 -m venv ~/.venv/osai-vllm"
+    echo "  source ~/.venv/osai-vllm/bin/activate"
+    echo "  pip install vllm"
+    echo ""
+    echo "Then activate the environment and run this script again."
+    exit 1
+fi
+
+echo "Starting vLLM local runtime..."
+echo "  Model: ${OSAI_VLLM_MODEL}"
+echo "  Host: ${OSAI_VLLM_HOST}"
+echo "  Port: ${OSAI_VLLM_PORT}"
+echo "  Base URL: ${OSAI_VLLM_BASE_URL}"
+echo ""
+echo "Press Ctrl+C to stop"
+echo ""
+
+exec vllm serve "$OSAI_VLLM_MODEL" \
+    --host "$OSAI_VLLM_HOST" \
+    --port "$OSAI_VLLM_PORT" \
+    --api-key "$OSAI_VLLM_API_KEY" \
+    $OSAI_VLLM_EXTRA_ARGS

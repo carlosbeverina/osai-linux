@@ -1,0 +1,27 @@
+#!/bin/bash
+# OSAI vLLM Environment
+# Source this script to set up vLLM runtime environment variables.
+# Usage: source scripts/osai-vllm-env
+
+set -euo pipefail
+
+# Resolve repo root (one level up from scripts/)
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Load root .env if present (but never print secrets)
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+    while IFS='=' read -r key value; do
+        # Only load OSAI_* and MINIMAX_* variables, skip secrets
+        if [[ "$key" =~ ^OSAI_VLLM_ ]] || [[ "$key" =~ ^MINIMAX_ ]]; then
+            export "$key=$value"
+        fi
+    done < "${REPO_ROOT}/.env"
+fi
+
+# Safe defaults for vLLM runtime
+export OSAI_VLLM_HOST="${OSAI_VLLM_HOST:-127.0.0.1}"
+export OSAI_VLLM_PORT="${OSAI_VLLM_PORT:-8091}"
+export OSAI_VLLM_BASE_URL="${OSAI_VLLM_BASE_URL:-http://${OSAI_VLLM_HOST}:${OSAI_VLLM_PORT}/v1}"
+export OSAI_VLLM_MODEL="${OSAI_VLLM_MODEL:-gemma-local}"
+export OSAI_VLLM_API_KEY="${OSAI_VLLM_API_KEY:-osai-local-dev-token}"
+export OSAI_VLLM_EXTRA_ARGS="${OSAI_VLLM_EXTRA_ARGS:-}"

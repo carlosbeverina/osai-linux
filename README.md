@@ -31,6 +31,58 @@ Current crates:
 - `osai-receipt-logger`
 - `osai-agent-cli`
 
+## vLLM Local Runtime
+
+OSAI uses **vLLM** as the primary local model runtime (not Ollama). vLLM provides OpenAI-compatible API for seamless routing.
+
+### vLLM Scripts
+
+```bash
+# Load vLLM environment variables
+source ./scripts/osai-vllm-env
+
+# Start vLLM in foreground (requires vllm installed)
+./scripts/osai-vllm-up
+
+# Check if vLLM is running and responsive
+./scripts/osai-vllm-check
+
+# Stop osai-vllm systemd service (if active)
+./scripts/osai-vllm-down
+```
+
+### Systemd User Service
+
+```bash
+# Install systemd user units (includes both model-router and vllm)
+./scripts/osai-install-user-services
+
+# Enable and start model-router at login
+systemctl --user enable --now osai-model-router.service
+
+# Check vLLM service status
+systemctl --user status osai-vllm.service
+
+# View vLLM logs
+journalctl --user -u osai-vllm -f
+```
+
+### Using Real vLLM with Model Router
+
+By default, Model Router uses mock mode (`OSAI_LOCAL_MOCK=true`). To use real vLLM:
+
+1. Start vLLM: `./scripts/osai-vllm-up`
+2. Create `~/.config/osai/model-router.env`:
+   ```
+   OSAI_LOCAL_MOCK=false
+   OSAI_VLLM_BASE_URL=http://127.0.0.1:8091/v1
+   OSAI_VLLM_MODEL=gemma-local
+   OSAI_VLLM_API_KEY=osai-local-dev-token
+   ```
+3. Restart Model Router: `systemctl --user restart osai-model-router.service`
+
+**Note**: vLLM must be installed manually. These scripts do not install vLLM or download models.
+
 ## Model Router Development
 
 The Model Router service is in `services/model-router/`. Use the development scripts:

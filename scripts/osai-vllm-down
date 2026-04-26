@@ -1,0 +1,26 @@
+#!/bin/bash
+# OSAI vLLM Down - Stop osai-vllm systemd user service
+set -euo pipefail
+
+echo "=== OSAI vLLM Service Stop ==="
+echo ""
+
+# Check if systemd user is available
+if ! command -v systemctl &> /dev/null; then
+    echo "systemctl not found - cannot stop systemd service"
+    exit 1
+fi
+
+# Check if osai-vllm.service is active
+if systemctl --user is-active --quiet osai-vllm.service 2>/dev/null; then
+    echo "Stopping osai-vllm.service..."
+    systemctl --user stop osai-vllm.service
+    echo "Service stopped."
+else
+    echo "osai-vllm.service is not active."
+    echo ""
+    echo "Note: If you started vLLM manually (e.g., via osai-vllm-up in foreground),"
+    echo "stop it with Ctrl+C."
+fi
+
+exit 0

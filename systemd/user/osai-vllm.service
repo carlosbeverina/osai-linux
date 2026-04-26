@@ -1,0 +1,17 @@
+[Unit]
+Description=OSAI vLLM Local Runtime
+After=network.target
+
+[Service]
+EnvironmentFile=%h/.config/osai/vllm.env
+Environment="OSAI_VLLM_HOST=127.0.0.1"
+Environment="OSAI_VLLM_PORT=8091"
+Environment="OSAI_VLLM_MODEL=gemma-local"
+Environment="OSAI_VLLM_API_KEY=osai-local-dev-token"
+Environment="OSAI_VLLM_EXTRA_ARGS="
+ExecStart=/usr/bin/env bash -lc 'vllm serve "$OSAI_VLLM_MODEL" --host "$OSAI_VLLM_HOST" --port "$OSAI_VLLM_PORT" --api-key "$OSAI_VLLM_API_KEY" $OSAI_VLLM_EXTRA_ARGS'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

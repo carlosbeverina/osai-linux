@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 ENABLE_NOW=false
+ENABLE_VLLM=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -13,11 +14,16 @@ while [[ $# -gt 0 ]]; do
             ENABLE_NOW=true
             shift
             ;;
+        --enable-vllm)
+            ENABLE_VLLM=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--enable-now]"
+            echo "Usage: $0 [--enable-now] [--enable-vllm]"
             echo ""
             echo "Options:"
-            echo "  --enable-now  Enable and start the service immediately"
+            echo "  --enable-now    Enable and start the service immediately"
+            echo "  --enable-vllm   Also enable vLLM service (only with --enable-now)"
             echo ""
             echo "This script installs systemd user units from:"
             echo "  ${REPO_ROOT}/systemd/user/"
@@ -31,6 +37,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "$ENABLE_VLLM" == "true" ]] && [[ "$ENABLE_NOW" != "true" ]]; then
+    echo "Error: --enable-vllm requires --enable-now"
+    exit 1
+fi
 
 USER_SERVICE_DIR="${HOME}/.config/systemd/user"
 SYSTEMD_SOURCE="${REPO_ROOT}/systemd/user"
@@ -57,14 +68,35 @@ systemctl --user daemon-reload
 echo ""
 echo "=== Installation complete ==="
 echo ""
+echo "Installed services:"
+echo "  - osai-model-router.service (API gateway)"
+echo "  - osai-vllm.service (local model runtime)"
+echo ""
 echo "Next steps:"
 echo ""
+
 if [[ "$ENABLE_NOW" == "true" ]]; then
     echo "Enabling and starting osai-model-router.service..."
     systemctl --user enable --now osai-model-router.service
     echo ""
     echo "Service status:"
     systemctl --user status osai-model-router.service
+
+    if [[ "$ENABLE_VLLM" == "true" ]]; then
+        echo ""
+        echo "Enabling and starting osai-vllm.service..."
+        systemctl --user enable --now osai-vllm.service
+        echo ""
+        echo "vLLM service status:"
+        systemctl --user status osai-vllm.service
+    else
+        echo ""
+        echo "To start osai-vllm.service manually:"
+        echo "  systemctl --user start osai-vllm.service"
+        echo ""
+        echo "To enable at login:"
+        echo "  systemctl --user enable osai-vllm.service"
+    fi
 else
     echo "To start osai-model-router.service manually:"
     echo "  systemctl --user start osai-model-router.service"
@@ -77,6 +109,11 @@ else
     echo ""
     echo "To view logs:"
     echo "  journalctl --user -u osai-model-router -f"
+    echo ""
+    echo "For vLLM runtime management:"
+    echo "  ./scripts/osai-vllm-up   # Start vLLM"
+    echo "  ./scripts/osai-vllm-check # Check health"
+    echo "  ./scripts/osai-vllm-down  # Stop vLLM service"
 fi
 
 exit 0

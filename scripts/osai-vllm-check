@@ -1,0 +1,59 @@
+#!/bin/bash
+# OSAI vLLM Check - Verify vLLM server is running and responsive
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Load vLLM environment
+source "${SCRIPT_DIR}/osai-vllm-env"
+
+FAILURES=0
+
+echo "=== OSAI vLLM Health Check ==="
+echo ""
+echo "Checking vLLM server at: ${OSAI_VLLM_BASE_URL}"
+echo ""
+
+# Check 1: GET /models
+echo "Check 1: GET /models"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    --max-time 10 \
+    -H "Authorization: Bearer ${OSAI_VLLM_API_KEY}" \
+    "${OSAI_VLLM_BASE_URL}/models")
+
+if [[ "$HTTP_CODE" == "200" ]]; then
+    echo "  OK - Received HTTP ${HTTP_CODE}"
+else
+    echo "  FAIL - Received HTTP ${HTTP_CODE}"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# Check 2: POST /chat/completions with tiny prompt
+echo ""
+echo "Check 2: POST /chat/completions (tiny prompt)"
+
+RESPONSE=$(curl -s --max-time 30 \
+    -H "Authorization: Bearer ${OSAI_VLLM_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"'"${OSAI_VLLM_MODEL}"'","messages":[{"role":"user","content":"Hi"}],"max_tokens":5}' \
+    "${OSAI_VLLM_BASE_URL}/chat/completions" 2>&1) || true
+
+# Check if response contains expected fields
+if echo "$RESPONSE" | grep -q '"choices"'; then
+    echo "  OK - Received valid chat completion response"
+else
+    echo "  FAIL - Invalid response:"
+    echo "  $RESPONSE"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+echo "=== Summary ==="
+if [[ $FAILURES -eq 0 ]]; then
+    echo "All checks passed!"
+    exit 0
+else
+    echo "${FAILURES} check(s) failed"
+    exit 1
+fi

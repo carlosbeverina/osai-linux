@@ -107,6 +107,33 @@ Then disable mock mode:
 OSAI_LOCAL_MOCK=false python -m osai_model_router.main
 ```
 
+## Using Real vLLM Instead of Mock Mode
+
+To use real vLLM instead of mock local responses:
+
+```bash
+# Disable mock mode
+export OSAI_LOCAL_MOCK=false
+
+# Configure vLLM connection
+export OSAI_VLLM_BASE_URL=http://127.0.0.1:8091/v1
+export OSAI_VLLM_MODEL=<your-local-model>
+export OSAI_VLLM_API_KEY=osai-local-dev-token
+```
+
+Or via `~/.config/osai/model-router.env`:
+
+```
+OSAI_LOCAL_MOCK=false
+OSAI_VLLM_BASE_URL=http://127.0.0.1:8091/v1
+OSAI_VLLM_MODEL=gemma-local
+OSAI_VLLM_API_KEY=osai-local-dev-token
+```
+
+Then restart the Model Router service or restart your development server.
+
+**Note**: No model is downloaded by these scripts. You must install vLLM and download models separately.
+
 ## MiniMax Configuration
 
 Configure via environment variables or `.env` file:
