@@ -60,6 +60,45 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Ask the model to generate a safe OSAI plan (does not execute).
+    Ask {
+        /// Message to send.
+        #[arg(long)]
+        message: Option<String>,
+        /// Model router URL.
+        #[arg(long, default_value = "http://127.0.0.1:8088")]
+        model_router_url: String,
+        /// Directory for receipts.
+        #[arg(long)]
+        receipts_dir: Option<PathBuf>,
+        /// Directory for generated plans.
+        #[arg(long, default_value = "./generated/plans")]
+        plans_dir: PathBuf,
+        /// Model to use.
+        #[arg(long, default_value = "osai-auto")]
+        model: String,
+        /// Privacy metadata hint.
+        #[arg(long, default_value = "local_only")]
+        privacy: String,
+        /// Maximum tokens to generate.
+        #[arg(long)]
+        max_tokens: Option<u32>,
+        /// Temperature for generation.
+        #[arg(long, default_value = "0.1")]
+        temperature: f32,
+        /// Print full JSON response.
+        #[arg(long)]
+        json: bool,
+        /// Also print generated YAML to stdout.
+        #[arg(long)]
+        print_plan: bool,
+        /// Output file path (optional).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Positional request words (joined with spaces).
+        #[arg(last = false)]
+        positional_request: Vec<String>,
+    },
     /// Initialize a new OSAI agent directory.
     Init {
         /// Directory to initialize.
@@ -308,6 +347,33 @@ fn main() -> Result<()> {
             &receipts_dir,
             skip_model_router,
             json,
+        ),
+        Commands::Ask {
+            message,
+            model_router_url,
+            receipts_dir,
+            plans_dir,
+            model,
+            privacy,
+            max_tokens,
+            temperature,
+            json,
+            print_plan,
+            output,
+            positional_request,
+        } => run_ask(
+            message.as_deref(),
+            &model_router_url,
+            receipts_dir.as_ref().map(|p| p.as_path()),
+            Some(plans_dir.as_path()),
+            &model,
+            &privacy,
+            max_tokens,
+            temperature,
+            json,
+            print_plan,
+            output.as_ref().map(|p| p.as_path()),
+            &positional_request,
         ),
         Commands::Tool { action } => match action {
             ToolCommands::Authorize {
@@ -1069,6 +1135,441 @@ fn run_chat(
     } else {
         println!("{}", content);
     }
+
+    Ok(())
+}
+
+fn sanitize_yaml_response(content: &str) -> String {
+    let trimmed = content.trim();
+    // Strip markdown fences if present
+    if trimmed.starts_with("```yaml") || trimmed.starts_with("```") {
+        let without_fence = trimmed
+            .trim_start_matches("```yaml")
+            .trim_start_matches("```")
+            .trim_start_matches('\n');
+        // Find closing fence
+        if let Some(end) = without_fence.find("```") {
+            return without_fence[..end].trim_end().to_string();
+        }
+        return without_fence.to_string();
+    }
+    trimmed.to_string()
+}
+
+fn slug_from_request(request: &str) -> String {
+    request
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("-")
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_lowercase()
+}
+
+fn default_ask_receipts_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("osai")
+        .join("receipts")
+        .join("ask")
+}
+
+fn run_ask(
+    message_arg: Option<&str>,
+    model_router_url: &str,
+    receipts_dir_override: Option<&std::path::Path>,
+    plans_dir_override: Option<&std::path::Path>,
+    model: &str,
+    privacy: &str,
+    max_tokens: Option<u32>,
+    temperature: f32,
+    json_output: bool,
+    print_plan: bool,
+    output_override: Option<&std::path::Path>,
+    positional_request: &[String],
+) -> Result<()> {
+    // Validate loopback URL
+    if !is_loopback_url(model_router_url) {
+        return Err(anyhow::anyhow!(
+            "Model router URL must be loopback only (127.0.0.1 or localhost): {}",
+            model_router_url
+        ));
+    }
+
+    // Resolve request: check --message and positional separately
+    let has_positional = !positional_request.is_empty();
+    let has_message_arg = message_arg.is_some();
+
+    if has_positional && has_message_arg {
+        return Err(anyhow::anyhow!(
+            "Cannot use both positional request and --message flag. Use one or the other."
+        ));
+    }
+
+    if !has_positional && !has_message_arg {
+        return Err(anyhow::anyhow!(
+            "No request provided. Use a positional request or --message flag."
+        ));
+    }
+
+    let request: String = if has_message_arg {
+        message_arg.unwrap().to_string()
+    } else {
+        positional_request.join(" ")
+    };
+
+    let request_length = request.len();
+
+    // Build system prompt for safe plan generation
+    let system_prompt = r#"You are an OSAI plan generator. Return ONLY valid OSAI Plan DSL YAML with no markdown fences, no explanation, and no additional text.
+
+## REQUIRED YAML SCHEMA
+
+Your output MUST match this exact top-level structure:
+version: "0.1"
+id: "<generate a fresh UUID v4>"
+title: "<short title>"
+description: "<one-sentence description>"
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "step-1"
+    action:
+      type: FilesList
+    description: "<what this step does>"
+    requires_approval: false
+    inputs:
+      path: "~/Downloads"
+rollback:
+  available: false
+metadata: {}
+
+## CRITICAL RULES
+
+1. Use `steps:` — NEVER use `plan:` or any other top-level key for the action list.
+2. Use exact action types: FilesList, FilesMove, FilesWrite, ModelChat, ReceiptCreate, DesktopNotify, BrowserOpenUrl, ShellRunSandboxed, Custom. Do NOT invent names like ListDirectory or ReadFile.
+3. Each step needs id, action.type, description, requires_approval, inputs.
+4. For listing a directory, use:
+   action:
+     type: FilesList
+   inputs:
+     path: "~/Downloads"
+5. Omit rollback entirely (or use: rollback: ~). Do not add rollback.steps unless rollback is obvious.
+6. Use metadata: {}.
+7. Generate a fresh UUID v4 for id — do not reuse the example UUID.
+
+## VALID EXAMPLE
+
+For the request "List my Downloads folder", output exactly:
+
+version: "0.1"
+id: "00000000-0000-4000-8000-000000000001"
+title: "List Downloads folder"
+description: "List files in the user's Downloads folder"
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "step-1"
+    action:
+      type: FilesList
+    description: "List files in Downloads"
+    requires_approval: false
+    inputs:
+      path: "~/Downloads"
+metadata: {}
+
+## SAFETY
+
+- Do NOT include ShellRunSandboxed unless user explicitly asks to run a command.
+- Do NOT include FilesWrite, FilesMove, FilesDelete (refuse destructive actions).
+- Prefer ModelChat or ReceiptCreate for information-only tasks.
+- risk: Low by default, Medium only with clear justification.
+- approval: Auto for read-only, Ask for anything that modifies state."#;
+
+    let _full_content = format!("{}\n\nUser request: {}", system_prompt, request);
+
+    // Build request
+    let chat_request = ChatRequest {
+        model: model.to_string(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: request.clone(),
+            },
+        ],
+        max_tokens: max_tokens.or(Some(1200)),
+        temperature,
+        metadata: ChatMetadata {
+            privacy: privacy.to_string(),
+        },
+    };
+
+    // Call model router
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
+
+    let url = format!("{}/v1/chat/completions", model_router_url);
+
+    let response = client
+        .post(&url)
+        .json(&chat_request)
+        .send()
+        .map_err(|e| anyhow::anyhow!("Model router request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        // Write failed receipt
+        write_ask_receipt(
+            receipts_dir_override,
+            model_router_url,
+            model,
+            privacy,
+            request_length,
+            None,
+            "Failed",
+            Some(&format!("Model router returned error {}: {}", status, body)),
+        )?;
+        return Err(anyhow::anyhow!(
+            "Model router returned error {}: {}",
+            status,
+            body
+        ));
+    }
+
+    let chat_response: ChatResponse = response
+        .json()
+        .map_err(|e| anyhow::anyhow!("Failed to parse model router response: {}", e))?;
+
+    // Extract content
+    let content = chat_response
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("Model response missing content"))?
+        .clone();
+
+    // Sanitize YAML response (strip markdown fences if present)
+    let yaml_content = sanitize_yaml_response(&content);
+
+    // Try to parse as OSAI Plan
+    let mut plan = match OsaiPlan::from_yaml(&yaml_content) {
+        Ok(p) => p,
+        Err(e) => {
+            // Write failed receipt
+            write_ask_receipt(
+                receipts_dir_override,
+                model_router_url,
+                model,
+                privacy,
+                request_length,
+                None,
+                "Failed",
+                Some(&format!("YAML parse error: {}", e)),
+            )?;
+            return Err(anyhow::anyhow!(
+                "Model returned invalid YAML: {}\nRaw response: {}",
+                e,
+                yaml_content.chars().take(200).collect::<String>()
+            ));
+        }
+    };
+
+    // Validate plan
+    if let Err(e) = plan.validate() {
+        // Write failed receipt
+        write_ask_receipt(
+            receipts_dir_override,
+            model_router_url,
+            model,
+            privacy,
+            request_length,
+            None,
+            "Failed",
+            Some(&format!("Validation error: {}", e)),
+        )?;
+        return Err(anyhow::anyhow!(
+            "Generated plan is invalid: {}\nYAML:\n{}",
+            e,
+            yaml_content
+        ));
+    }
+
+    // Replace example UUID with a fresh generated UUID
+    let example_uuid = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").ok();
+    if let Some(expected) = example_uuid {
+        if plan.id == expected {
+            plan.id = uuid::Uuid::new_v4();
+        }
+    }
+
+    // Determine output path
+    let output_path = if let Some(path) = output_override {
+        if path.exists() {
+            return Err(anyhow::anyhow!(
+                "Output path already exists: {}",
+                path.display()
+            ));
+        }
+        path.to_path_buf()
+    } else {
+        let plans_dir =
+            plans_dir_override.unwrap_or_else(|| std::path::Path::new("./generated/plans"));
+        let slug = slug_from_request(&request);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let filename = format!("{}-{}.yml", slug, timestamp);
+        let full_path = plans_dir.join(&filename);
+        if full_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Generated plan path already exists: {}",
+                full_path.display()
+            ));
+        }
+        full_path
+    };
+
+    // Create parent directories if needed
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("Failed to create plans directory: {}", e))?;
+    }
+
+    // Save plan
+    let yaml_output = plan
+        .to_yaml()
+        .map_err(|e| anyhow::anyhow!("Failed to serialize plan to YAML: {}", e))?;
+    fs::write(&output_path, &yaml_output)
+        .map_err(|e| anyhow::anyhow!("Failed to write plan file: {}", e))?;
+
+    // Write success receipt
+    write_ask_receipt(
+        receipts_dir_override,
+        model_router_url,
+        model,
+        privacy,
+        request_length,
+        Some(&output_path),
+        "Executed",
+        None,
+    )?;
+
+    // Print output
+    if json_output {
+        #[derive(Serialize)]
+        struct AskResult {
+            status: String,
+            output_path: String,
+            validation: String,
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&AskResult {
+                status: "success".to_string(),
+                output_path: output_path.display().to_string(),
+                validation: "valid".to_string(),
+            })
+            .unwrap()
+        );
+    } else {
+        println!("Generated valid plan: {}", output_path.display());
+    }
+
+    // Print plan if requested
+    if print_plan {
+        println!();
+        println!("{}", yaml_output);
+    }
+
+    Ok(())
+}
+
+fn write_ask_receipt(
+    receipts_dir_override: Option<&std::path::Path>,
+    model_router_url: &str,
+    model: &str,
+    privacy: &str,
+    request_length: usize,
+    output_path: Option<&std::path::Path>,
+    status: &str,
+    error: Option<&str>,
+) -> Result<()> {
+    let receipts_dir = if let Some(dir) = receipts_dir_override {
+        dir.to_path_buf()
+    } else {
+        default_ask_receipts_dir()
+    };
+    let store = ReceiptStore::new(&receipts_dir);
+    store
+        .ensure_dirs()
+        .map_err(|e| anyhow::anyhow!("Failed to create receipts directory: {}", e))?;
+
+    // Extract host from model router URL (no secrets)
+    let mr_host = url::Url::parse(model_router_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let receipt_status = if status == "Executed" {
+        ReceiptStatus::Executed
+    } else {
+        ReceiptStatus::Failed
+    };
+
+    let mut receipt = Receipt::new("osai-agent", "PlanGenerate")
+        .with_tool("osai-agent ask")
+        .with_risk("Low")
+        .with_approval("Auto")
+        .with_status(receipt_status)
+        .with_inputs(serde_json::json!({
+            "model_router_url_host": mr_host,
+            "model": model,
+            "privacy": privacy,
+            "request_length": request_length,
+        }))
+        .with_outputs(serde_json::json!({
+            "validation_status": status.to_lowercase(),
+        }));
+
+    if let Some(path) = output_path {
+        let outputs = receipt
+            .outputs_redacted
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+        let mut obj = outputs.as_object().cloned().unwrap_or_default();
+        obj.insert(
+            "output_path".to_string(),
+            serde_json::json!(path.display().to_string()),
+        );
+        receipt.outputs_redacted = Some(serde_json::Value::Object(obj));
+    }
+
+    if let Some(err) = error {
+        receipt.error = Some(err.to_string());
+    }
+
+    store
+        .write(&receipt)
+        .map_err(|e| anyhow::anyhow!("Failed to write receipt: {}", e))?;
 
     Ok(())
 }
@@ -3014,5 +3515,729 @@ metadata: {}
             &[],
         );
         assert!(result.is_ok());
+    }
+
+    // Ask command tests
+
+    fn valid_plan_yaml() -> String {
+        r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440000"
+title: Test Plan
+actor: user
+risk: Low
+approval: Auto
+steps:
+  - id: step-1
+    action:
+      type: ModelChat
+    description: Test step
+    requires_approval: false
+    inputs: {}
+metadata: {}
+"#
+        .to_string()
+    }
+
+    #[test]
+    fn test_ask_positional_request_joined() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "ask-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": valid_plan_yaml()},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_ask(
+            None,
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &[
+                "List".to_string(),
+                "my".to_string(),
+                "downloads".to_string(),
+            ],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ask_message_flag_works() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "ask-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": valid_plan_yaml()},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_ask(
+            Some("List my downloads"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &[],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ask_positional_and_message_conflict() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let result = run_ask(
+            Some("--message"),
+            "http://127.0.0.1:8088",
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &["Hello".to_string()],
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot use both"));
+    }
+
+    #[test]
+    fn test_ask_missing_request() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let result = run_ask(
+            None,
+            "http://127.0.0.1:8088",
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &[],
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No request provided"));
+    }
+
+    #[test]
+    fn test_ask_saves_valid_plan() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "ask-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": valid_plan_yaml()},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_ask(
+            Some("List my downloads"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &[],
+        );
+        assert!(result.is_ok());
+
+        // Verify plan was saved and is valid
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 1);
+
+        let receipt_content = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(receipt_content.contains("\"action\": \"PlanGenerate\""));
+        assert!(receipt_content.contains("\"tool\": \"osai-agent ask\""));
+        assert!(receipt_content.contains("\"status\": \"Executed\""));
+    }
+
+    #[test]
+    fn test_ask_output_refuses_overwrite() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+        // Create plans_dir first since it's the parent of existing_file
+        fs::create_dir_all(&plans_dir).unwrap();
+        let existing_file = plans_dir.join("existing-plan.yml");
+        fs::write(&existing_file, "existing content").unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "ask-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": valid_plan_yaml()},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_ask(
+            Some("List my downloads"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            Some(existing_file.as_path()),
+            &[],
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn test_ask_markdown_fenced_yaml_sanitized() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let fenced_yaml = format!("```yaml\n{}\n```", valid_plan_yaml());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "ask-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": fenced_yaml},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_ask(
+            Some("List my downloads"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &[],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ask_invalid_yaml_returns_nonzero() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "ask-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "not: valid [yaml"},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_ask(
+            Some("List my downloads"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &[],
+        );
+        assert!(result.is_err());
+
+        // Verify failed receipt was written
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 1);
+
+        let receipt_content = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(receipt_content.contains("\"status\": \"Failed\""));
+    }
+
+    #[test]
+    fn test_ask_receipt_does_not_contain_request_content() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "ask-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": valid_plan_yaml()},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        run_ask(
+            Some("Tell me a secret"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        let receipt_content = std::fs::read_to_string(&paths[0]).unwrap();
+
+        assert!(receipt_content.contains("\"request_length\""));
+        assert!(!receipt_content.contains("Tell me a secret"));
+        assert!(!receipt_content.contains("secret"));
+    }
+
+    #[test]
+    fn test_ask_json_flag_prints_json() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "ask-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": valid_plan_yaml()},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_ask(
+            Some("List my downloads"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            true, // json_output
+            false,
+            None,
+            &[],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ask_model_router_failure_returns_nonzero() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(500)
+                        .set_body_raw("Internal error", "text/plain"),
+                )
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_ask(
+            Some("List my downloads"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &[],
+        );
+        assert!(result.is_err());
+
+        // Verify failed receipt was written
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 1);
+
+        let receipt_content = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(receipt_content.contains("\"status\": \"Failed\""));
+    }
+
+    #[test]
+    fn test_ask_with_plan_instead_of_steps_fails_cleanly() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+        fs::create_dir_all(&plans_dir).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            // Model returns invalid YAML with `plan:` instead of `steps:`
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "ask-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "actor: user\nrisk: Low\napproval: Auto\nplan:\n  - action:\n      type: FilesList\n    path: ~/Downloads\nmetadata: {}"
+                            },
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_ask(
+            Some("List my downloads"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &[],
+        );
+        // Must fail — model used `plan:` which is not a valid top-level key
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("YAML parse error") || err.contains("invalid"),
+            "Expected YAML parse error, got: {}",
+            err
+        );
+
+        // Receipt must be written
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 1);
+        let receipt_content = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(receipt_content.contains("\"status\": \"Failed\""));
+        // Receipt must NOT contain request text
+        assert!(!receipt_content.contains("downloads"));
+    }
+
+    #[test]
+    fn test_ask_replaces_example_uuid_with_fresh_uuid() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "ask-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": r#"version: "0.1"
+id: "00000000-0000-4000-8000-000000000001"
+title: "List Downloads"
+description: "List files in Downloads"
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "step-1"
+    action:
+      type: FilesList
+    description: "List files"
+    requires_approval: false
+    inputs:
+      path: "~/Downloads"
+metadata: {}"#
+                            },
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_ask(
+            Some("List my downloads"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            Some(plans_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.1,
+            false,
+            false,
+            None,
+            &[],
+        );
+        // Print error for debugging
+        if let Err(ref e) = result {
+            eprintln!("ask failed: {}", e);
+        }
+        assert!(result.is_ok());
+
+        // Verify the saved plan has a fresh UUID, not the example one
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 1);
+        let receipt_content = std::fs::read_to_string(&paths[0]).unwrap();
+        // Receipt should not contain the example UUID
+        assert!(!receipt_content.contains("00000000-0000-4000-8000-000000000001"));
+    }
+
+    #[test]
+    fn test_ask_system_prompt_contains_required_elements() {
+        // Verify the prompt contains steps:, FilesList, and example
+        let system_prompt = r#"You are an OSAI plan generator. Return ONLY valid OSAI Plan DSL YAML with no markdown fences, no explanation, and no additional text.
+
+## REQUIRED YAML SCHEMA
+
+Your output MUST match this exact top-level structure:
+version: "0.1"
+id: "<generate a fresh UUID v4>"
+title: "<short title>"
+description: "<one-sentence description>"
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "step-1"
+    action:
+      type: FilesList
+    description: "<what this step does>"
+    requires_approval: false
+    inputs:
+      path: "~/Downloads"
+rollback:
+  available: false
+metadata: {}
+
+## CRITICAL RULES
+
+1. Use `steps:` — NEVER use `plan:` or any other top-level key for the action list.
+2. Use exact action types: FilesList, FilesMove, FilesWrite, ModelChat, ReceiptCreate, DesktopNotify, BrowserOpenUrl, ShellRunSandboxed, Custom. Do NOT invent names like ListDirectory or ReadFile.
+3. Each step needs id, action.type, description, requires_approval, inputs.
+4. For listing a directory, use:
+   action:
+     type: FilesList
+   inputs:
+     path: "~/Downloads"
+5. Omit rollback entirely (or use: rollback: ~). Do not add rollback.steps unless rollback is obvious.
+6. Use metadata: {}.
+7. Generate a fresh UUID v4 for id — do not reuse the example UUID.
+
+## VALID EXAMPLE
+
+For the request "List my Downloads folder", output exactly:
+
+version: "0.1"
+id: "00000000-0000-4000-8000-000000000001"
+title: "List Downloads folder"
+description: "List files in the user's Downloads folder"
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "step-1"
+    action:
+      type: FilesList
+    description: "List files in Downloads"
+    requires_approval: false
+    inputs:
+      path: "~/Downloads"
+metadata: {}
+
+## SAFETY
+
+- Do NOT include ShellRunSandboxed unless user explicitly asks to run a command.
+- Do NOT include FilesWrite, FilesMove, FilesDelete (refuse destructive actions).
+- Prefer ModelChat or ReceiptCreate for information-only tasks.
+- risk: Low by default, Medium only with clear justification.
+- approval: Auto for read-only, Ask for anything that modifies state."#;
+
+        assert!(system_prompt.contains("steps:"));
+        assert!(system_prompt.contains("NEVER use `plan:`"));
+        assert!(system_prompt.contains("FilesList"));
+        assert!(system_prompt.contains("00000000-0000-4000-8000-000000000001"));
+        assert!(system_prompt.contains("rollback:"));
+        assert!(system_prompt.contains("metadata: {}"));
     }
 }
