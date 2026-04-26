@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use osai_plan_dsl::{OsaiPlan, PlanStep};
-use osai_receipt_logger::ReceiptStore;
+use osai_receipt_logger::{Receipt, ReceiptStatus, ReceiptStore};
 use osai_tool_executor::{ExecutionStatus, ToolExecutor};
 use osai_toolbroker::{ToolBroker, ToolPolicy, ToolRequest};
 use serde::{Deserialize, Serialize};
@@ -64,6 +64,36 @@ enum Commands {
     Init {
         /// Directory to initialize.
         directory: PathBuf,
+    },
+    /// Chat with the model router (no plan needed).
+    Chat {
+        /// Message to send.
+        #[arg(long)]
+        message: Option<String>,
+        /// Model router URL.
+        #[arg(long, default_value = "http://127.0.0.1:8088")]
+        model_router_url: String,
+        /// Directory for receipts.
+        #[arg(long)]
+        receipts_dir: Option<PathBuf>,
+        /// Model to use.
+        #[arg(long, default_value = "osai-auto")]
+        model: String,
+        /// Privacy metadata hint.
+        #[arg(long, default_value = "local_only")]
+        privacy: String,
+        /// Maximum tokens to generate.
+        #[arg(long)]
+        max_tokens: Option<u32>,
+        /// Temperature for generation.
+        #[arg(long, default_value = "0.2")]
+        temperature: f32,
+        /// Print full JSON response.
+        #[arg(long)]
+        json: bool,
+        /// Positional message words (joined with spaces).
+        #[arg(last = true)]
+        positional_message: Vec<String>,
     },
 }
 
@@ -245,6 +275,27 @@ fn main() -> Result<()> {
             println!("Initialized OSAI agent in: {}", directory.display());
             Ok(())
         }
+        Commands::Chat {
+            message,
+            model_router_url,
+            receipts_dir,
+            model,
+            privacy,
+            max_tokens,
+            temperature,
+            json,
+            positional_message,
+        } => run_chat(
+            message.as_deref(),
+            &model_router_url,
+            receipts_dir.as_ref().map(|p| p.as_path()),
+            &model,
+            &privacy,
+            max_tokens,
+            temperature,
+            json,
+            &positional_message,
+        ),
         Commands::Doctor {
             repo_root,
             model_router_url,
@@ -824,6 +875,204 @@ fn is_loopback_url(url: &str) -> bool {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    temperature: f32,
+    metadata: ChatMetadata,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatMetadata {
+    privacy: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatResponse {
+    id: String,
+    model: String,
+    choices: Vec<ChatChoice>,
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatChoice {
+    message: ChatChoiceMessage,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatChoiceMessage {
+    role: String,
+    content: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatUsage {
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+    total_tokens: Option<u32>,
+}
+
+fn default_receipts_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("osai")
+        .join("receipts")
+        .join("chat")
+}
+
+fn run_chat(
+    message_arg: Option<&str>,
+    model_router_url: &str,
+    receipts_dir_override: Option<&std::path::Path>,
+    model: &str,
+    privacy: &str,
+    max_tokens: Option<u32>,
+    temperature: f32,
+    json_output: bool,
+    positional_message: &[String],
+) -> Result<()> {
+    // Validate loopback URL
+    if !is_loopback_url(model_router_url) {
+        return Err(anyhow::anyhow!(
+            "Model router URL must be loopback only (127.0.0.1 or localhost): {}",
+            model_router_url
+        ));
+    }
+
+    // Resolve message: check --message and positional separately
+    let has_positional = !positional_message.is_empty();
+    let has_message_arg = message_arg.is_some();
+
+    if has_positional && has_message_arg {
+        return Err(anyhow::anyhow!(
+            "Cannot use both positional message and --message flag. Use one or the other."
+        ));
+    }
+
+    if !has_positional && !has_message_arg {
+        return Err(anyhow::anyhow!(
+            "No message provided. Use a positional message or --message flag."
+        ));
+    }
+
+    let message: String = if has_message_arg {
+        message_arg.unwrap().to_string()
+    } else {
+        positional_message.join(" ")
+    };
+
+    // Build request
+    let request = ChatRequest {
+        model: model.to_string(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: message.to_string(),
+        }],
+        max_tokens,
+        temperature,
+        metadata: ChatMetadata {
+            privacy: privacy.to_string(),
+        },
+    };
+
+    // Call model router
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
+
+    let url = format!("{}/v1/chat/completions", model_router_url);
+
+    let response = client
+        .post(&url)
+        .json(&request)
+        .send()
+        .map_err(|e| anyhow::anyhow!("Model router request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "Model router returned error {}: {}",
+            status,
+            body
+        ));
+    }
+
+    let chat_response: ChatResponse = response
+        .json()
+        .map_err(|e| anyhow::anyhow!("Failed to parse model router response: {}", e))?;
+
+    // Extract assistant content
+    let content = chat_response
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("Model response missing content"))?
+        .clone();
+
+    let response_length = content.len();
+
+    // Write receipt
+    let receipts_dir = if let Some(dir) = receipts_dir_override {
+        dir.to_path_buf()
+    } else {
+        default_receipts_dir()
+    };
+    let store = ReceiptStore::new(&receipts_dir);
+    store
+        .ensure_dirs()
+        .map_err(|e| anyhow::anyhow!("Failed to create receipts directory: {}", e))?;
+
+    // Extract host from model router URL for receipt (no secrets)
+    let mr_host = url::Url::parse(model_router_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let receipt = Receipt::new("osai-agent", "ModelChat")
+        .with_tool("osai-agent chat")
+        .with_risk("Low")
+        .with_approval("Auto")
+        .with_status(ReceiptStatus::Executed)
+        .with_inputs(serde_json::json!({
+            "model_router_url_host": mr_host,
+            "model": model,
+            "privacy": privacy,
+            "prompt_length": message.len(),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }))
+        .with_outputs(serde_json::json!({
+            "response_length": response_length,
+            "finish_reason": chat_response.choices.first().and_then(|c| c.finish_reason.clone()),
+        }));
+
+    store
+        .write(&receipt)
+        .map_err(|e| anyhow::anyhow!("Failed to write receipt: {}", e))?;
+
+    // Output
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&chat_response).unwrap());
+    } else {
+        println!("{}", content);
+    }
+
+    Ok(())
+}
+
 fn check_repo_structure(repo_root: &PathBuf) -> (String, String) {
     let required_paths = vec![
         "Cargo.toml",
@@ -1061,6 +1310,7 @@ fn check_model_router_models(model_router_url: &str) -> (String, String) {
 mod tests {
     use super::*;
     use std::fs;
+    use wiremock::matchers::method;
 
     #[test]
     fn test_init_creates_files() {
@@ -2348,5 +2598,421 @@ metadata: {}
         assert!(!is_loopback_url("http://example.com:8088"));
         assert!(!is_loopback_url("https://127.0.0.1:8088"));
         assert!(!is_loopback_url("http://0.0.0.0:8088"));
+    }
+
+    // Chat command tests
+
+    #[test]
+    fn test_chat_positional_message_joined() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "chat-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "Hello world"},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_chat(
+            None,
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.2,
+            false,
+            &["Hello".to_string(), "world".to_string()],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_chat_message_flag_works() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "chat-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "Hi there"},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_chat(
+            Some("Hi there"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.2,
+            false,
+            &[],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_chat_positional_and_message_conflict() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let result = run_chat(
+            Some("--message"),
+            "http://127.0.0.1:8088",
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.2,
+            false,
+            &["Hello".to_string()],
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot use both"));
+    }
+
+    #[test]
+    fn test_chat_missing_message() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let result = run_chat(
+            None,
+            "http://127.0.0.1:8088",
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.2,
+            false,
+            &[],
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No message provided"));
+    }
+
+    #[test]
+    fn test_chat_mocked_success_prints_content() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "chat-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "The answer is 42"},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_chat(
+            Some("What is the answer?"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.2,
+            false,
+            &[],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_chat_mocked_failure_returns_nonzero() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(500)
+                        .set_body_raw("Internal error", "text/plain"),
+                )
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_chat(
+            Some("Hello"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.2,
+            false,
+            &[],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_chat_receipt_is_written() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "chat-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "Hi"},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        run_chat(
+            Some("Hello"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.2,
+            false,
+            &[],
+        )
+        .unwrap();
+
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        assert_eq!(paths.len(), 1);
+
+        let receipt_content = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(receipt_content.contains("\"action\": \"ModelChat\""));
+        assert!(receipt_content.contains("\"tool\": \"osai-agent chat\""));
+        assert!(receipt_content.contains("\"status\": \"Executed\""));
+    }
+
+    #[test]
+    fn test_chat_receipt_does_not_contain_prompt_content() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "chat-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "Secret response"},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        run_chat(
+            Some("Tell me a secret"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.2,
+            false,
+            &[],
+        )
+        .unwrap();
+
+        let store = ReceiptStore::new(&receipts_dir);
+        let paths = store.list().unwrap();
+        let receipt_content = std::fs::read_to_string(&paths[0]).unwrap();
+
+        assert!(receipt_content.contains("\"prompt_length\""));
+        assert!(!receipt_content.contains("Tell me a secret"));
+        assert!(!receipt_content.contains("secret"));
+    }
+
+    #[test]
+    fn test_chat_json_flag_prints_json() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "chat-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "JSON output"},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_chat(
+            Some("Show me JSON"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.2,
+            true,
+            &[],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_chat_max_tokens_not_sent_when_none() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "chat-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "No max_tokens"},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_chat(
+            Some("Hello"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            None,
+            0.2,
+            false,
+            &[],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_chat_max_tokens_sent_when_provided() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock_server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(async {
+            wiremock::Mock::given(method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "id": "chat-test",
+                        "model": "osai-auto",
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "Has max_tokens"},
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                ))
+                .mount(&mock_server)
+                .await;
+        });
+
+        let result = run_chat(
+            Some("Hello"),
+            &mock_server.uri(),
+            Some(receipts_dir.as_path()),
+            "osai-auto",
+            "local_only",
+            Some(100),
+            0.2,
+            false,
+            &[],
+        );
+        assert!(result.is_ok());
     }
 }
