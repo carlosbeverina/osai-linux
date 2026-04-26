@@ -5,13 +5,12 @@ This document describes how to validate the OSAI llama.cpp local runtime integra
 ## Architecture Path
 
 ```
-llama.cpp llama-server (GGUF, CPU/GPU)
-  → Model Router with OSAI_LOCAL_PROVIDER=llamacpp, OSAI_LOCAL_MOCK=false
-  → osai-agent CLI tool run
-  → examples/plans/model-chat.yml
+osai-agent CLI tool run
+  → ToolBroker
   → ToolExecutor ModelChat
-  → Model Router
-  → llama.cpp llama-server
+  → Model Router (OSAI_LOCAL_PROVIDER=llamacpp, OSAI_LOCAL_MOCK=false)
+  → llama.cpp llama-server (CUDA build)
+  → Qwen2.5-0.5B GGUF Q4_K_M
   → receipts
 ```
 
@@ -19,9 +18,12 @@ llama.cpp llama-server (GGUF, CPU/GPU)
 
 | Component | Details |
 |-----------|---------|
-| Hardware | RTX 4060 Laptop (8GB VRAM) |
-| Build used | CPU build (CUDA build not yet installed) |
-| llama.cpp | Repo-local build from `.local-runtimes/llama.cpp` |
+| OS | elementary OS 8 (Ubuntu 24.04 base) |
+| GPU | NVIDIA RTX 4060 Laptop, 8 GB VRAM |
+| NVIDIA driver | 580.126.09 |
+| CUDA Toolkit | 13.0 |
+| nvcc | V13.0.88 |
+| llama.cpp | Repo-local CUDA build from `.local-runtimes/llama.cpp` |
 | Model | Qwen2.5-0.5B-Instruct GGUF Q4_K_M |
 | Model path | `.local-models/llamacpp/qwen2.5-0.5b-instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf` |
 | Ports | llama.cpp: 8092, Model Router: 8088 |
@@ -127,16 +129,33 @@ cat /tmp/osai-model-router-receipts-llamacpp/*.json
 
 **Workaround**: Use llama.cpp with quantized GGUF models instead. llama.cpp handles GPU memory more efficiently and supports CPU fallback.
 
-### CPU-only llama.cpp build
+## Validation Commands
 
-**Current**: Using CPU build since CUDA toolkit not yet installed on this machine.
+### Verify CUDA build
 
-**Next**: Install CUDA Toolkit and rebuild llama.cpp with `GGML_CUDA=ON` for GPU acceleration.
+```bash
+ldd .local-runtimes/llama.cpp/build/bin/llama-server | grep -Ei "cuda|cublas|cudart"
+```
+
+Expected: lines containing `cuda`, `cublas`, or `cudart` — confirming the CUDA-enabled build.
+
+### Run E2E validation
+
+```bash
+./scripts/osai-local-check
+```
+
+All 7 checks must pass.
+
+## Observed Performance
+
+- Direct llama.cpp request: ~328 predicted tokens/s on Qwen2.5-0.5B GGUF Q4_K_M
+- llama.cpp CUDA build is validated, but the first test GGUF is small and not the final OSAI model
 
 ## Next Steps
 
-1. **Install CUDA Toolkit** and rebuild llama.cpp with GPU support
-2. **Test larger GGUF models** (e.g., Gemma 4 E2B/E4B GGUF)
-3. **Test Gemma GGUF** models for comparison
-4. **Benchmark CPU vs GPU** llama.cpp performance on RTX 4060
+1. **Test larger GGUF models** (e.g., Gemma 4 E2B/E4B GGUF)
+2. **Test Gemma GGUF** models for comparison
+3. **Add model selection policy** for laptop profiles (battery vs. performance)
+4. **Benchmark** CPU vs GPU llama.cpp performance on RTX 4060
 5. **Validate vLLM** on desktop with dedicated GPU when available
