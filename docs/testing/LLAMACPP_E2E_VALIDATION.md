@@ -163,3 +163,23 @@ All 7 checks must pass.
 3. **Add model selection policy** for laptop profiles (battery vs. performance)
 4. **Benchmark** CPU vs GPU llama.cpp performance on RTX 4060
 5. **Validate vLLM** on desktop with dedicated GPU when available
+
+## osai-agent apply Validation
+
+`osai-agent apply` has been validated with generated FilesList plans:
+
+- **dry-run execution**: Validates plan, prints authorization summary, writes receipt with `dry_run: true` — no steps execute
+- **real execution**: Validates plan, authorizes through ToolBroker, executes allowed steps via ToolExecutor, writes receipts
+- **receipts**: PlanApply receipts generated with plan_id, policy_path, step counts — no prompt content or secrets
+- **approval handling**: approval-required steps (mode: Ask) are skipped without `--approve` or `--approve-all`
+- **denied steps**: AlwaysDeny actions are blocked regardless of `--approve-all`
+
+**Validated MVP loop:**
+```bash
+./scripts/osai-local-up
+./scripts/osai-local-check
+cargo run -p osai-agent-cli -- ask "Create a safe plan to list my Downloads folder"
+cargo run -p osai-agent-cli -- plan validate <generated-plan>
+cargo run -p osai-agent-cli -- apply <generated-plan> --dry-run
+cargo run -p osai-agent-cli -- apply <generated-plan>
+```

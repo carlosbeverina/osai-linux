@@ -22,21 +22,27 @@ The safety model ensures that even a compromised or misbehaving model cannot dir
 User
   │
   ▼
-osai-agent CLI / Future UI
+osai-agent CLI (chat | ask | apply)
   │
-  ▼
-OSAI Plan DSL (validated)
+  ├──▶ chat ──▶ Model Router ──▶ Gemma/MiniMax
+  │                      │
+  │                      ▼
+  │                 Receipt Logger
   │
-  ▼
-ToolBroker (authorized)
+  ├──▶ ask ──▶ Model Router ──▶ Gemma (plan generation)
+  │                      │              │
+  │                      ▼              ▼
+  │                 Receipt Logger  Plan DSL YAML (validated)
   │
-  ├──▶ ToolExecutor ──▶ Receipt Logger
-  │                     (safe actions only)
-  │
-  └──▶ Model Router ──▶ MiniMax/Gemma (when needed)
-         │
-         ▼
-       Receipt Logger
+  └──▶ apply ──▶ Plan DSL (validated)
+                    │
+                    ▼
+              ToolBroker (authorized)
+                    │
+                    ├──▶ ToolExecutor ──▶ Receipt Logger
+                    │       (safe actions only)
+                    │
+                    └──▶ Model Router ──▶ Gemma (when needed)
 ```
 
 ### 2.2 Future Path to Production
@@ -137,6 +143,9 @@ Fedora Atomic / Universal Blue / BlueBuild
 - `tool authorize` - Authorize plan against policy (no execution)
 - `tool run` - Authorize and execute plan
 - `doctor` - Run diagnostic checks
+- `chat` - Conversational chat with local/cloud model via Model Router
+- `ask` - Generate valid OSAI Plan DSL YAML from natural language (no execution)
+- `apply` - Validate, authorize, and execute a plan end-to-end (with approval flags)
 
 **Current Limitations**:
 - No interactive approval workflow

@@ -230,3 +230,44 @@ journalctl --user -u osai-model-router -f
 To opt into real MiniMax, set `MINIMAX_API_KEY` in your `.env` and either:
 - Pass `OSAI_MODEL_ROUTER_MOCK_CLOUD=false` to `osai-dev-up`
 - Or create `~/.config/osai/model-router.env` with `OSAI_MODEL_ROUTER_MOCK_CLOUD=false`
+
+## Current MVP Loop
+
+The validated MVP loop is: start runtime → chat/ask → plan validate → apply dry-run → apply execute
+
+```bash
+# 1. Start local runtime: llama.cpp CUDA + Model Router
+./scripts/osai-local-up
+
+# 2. Validate runtime end-to-end
+./scripts/osai-local-check
+
+# 3. Chat with local Gemma 4 E2B Q8 GGUF via Model Router
+cargo run -p osai-agent-cli -- chat "What can OSAI do locally?"
+
+# 4. Ask to generate a safe OSAI Plan DSL YAML plan (generates but does not execute)
+cargo run -p osai-agent-cli -- ask \
+  --print-plan \
+  "Create a safe plan to list my Downloads folder"
+
+# 5. Validate the generated plan
+cargo run -p osai-agent-cli -- plan validate <generated-plan>
+
+# 6. Dry-run apply to see authorization summary without execution
+cargo run -p osai-agent-cli -- apply <generated-plan> --dry-run
+
+# 7. Execute the plan (validates, authorizes, executes through ToolBroker/ToolExecutor)
+cargo run -p osai-agent-cli -- apply <generated-plan>
+```
+
+**Key behaviors:**
+
+- **local runtime** uses llama.cpp CUDA + Gemma 4 E2B Q8 GGUF by default (port 8092 for llama.cpp, 8088 for Model Router)
+- **ask** generates and validates a Plan DSL YAML but does not execute anything — safe for exploration
+- **apply** validates the plan, authorizes each step through ToolBroker, then executes only allowed/safe actions through ToolExecutor
+- **apply respects approvals** — approval-required steps are skipped unless `--approve <step-id>` or `--approve-all` is passed
+- **denied steps never execute** — ToolBroker blocks them regardless of `--approve-all`
+- **receipts are generated** for every apply action (plan generation, authorization, execution)
+- **prompt/request contents are not stored in receipts** — only metadata (message counts, roles, action types)
+
+**Receipts location:** `~/.local/share/osai/receipts/apply/` (or custom via `--receipts-dir`)

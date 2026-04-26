@@ -28,6 +28,87 @@ osai-agent plan print <path> --format json|yaml
 ```
 Reads a plan file, validates it, and prints it in the specified format (JSON pretty or YAML).
 
+### Chat Command
+
+#### Chat with the model router
+```bash
+cargo run -p osai-agent-cli -- chat "What can OSAI do locally?"
+# or with --message flag
+cargo run -p osai-agent-cli -- chat --message "What can OSAI do locally?"
+```
+
+**Purpose:** Conversational interface with local Gemma 4 via Model Router. No plan needed — direct chat.
+
+**Safety:** All model calls route through Model Router (loopback only). Receipt is written with only message counts/roles stored (not prompt content).
+
+**Receipts:** Written to `~/.local/share/osai/receipts/chat/` or custom via `--receipts-dir`.
+
+### Ask Command
+
+#### Generate a safe OSAI Plan DSL YAML plan
+```bash
+cargo run -p osai-agent-cli -- ask "Create a safe plan to list my Downloads folder"
+# with full output options
+cargo run -p osai-agent-cli -- ask \
+  --print-plan \
+  --message "Create a safe plan to list my Downloads folder"
+```
+
+**Purpose:** Generate a valid OSAI Plan DSL YAML plan from a natural language request. The plan is validated but **never executed** — safe for exploration.
+
+**Safety notes:**
+- ask generates but does not execute
+- Model is instructed to refuse ShellRunSandboxed, FilesWrite, FilesMove, FilesDelete unless explicitly requested
+- Prompt instructs model to return only YAML with no markdown fences
+- Example UUID in prompt is replaced with a fresh generated UUID before saving
+- Receipt does not contain request text (only request length)
+
+**Receipts:** Written to `~/.local/share/osai/receipts/ask/` or custom via `--receipts-dir`.
+
+### Apply Command
+
+#### Apply a plan (validate + authorize + execute)
+```bash
+# Dry-run: see authorization summary without executing
+cargo run -p osai-agent-cli -- apply <plan-path> --dry-run
+
+# Execute: validate, authorize, then execute allowed steps
+cargo run -p osai-agent-cli -- apply <plan-path>
+
+# With custom policy
+cargo run -p osai-agent-cli -- apply <plan-path> \
+  --policy examples/policies/default-secure.yml
+
+# Approve specific step
+cargo run -p osai-agent-cli -- apply <plan-path> --approve step-2
+
+# Approve all approval-required steps
+cargo run -p osai-agent-cli -- apply <plan-path> --approve-all
+
+# JSON output
+cargo run -p osai-agent-cli -- apply <plan-path> --json
+```
+
+**Purpose:** End-to-end plan execution. Applies a plan through the full OSAI safety stack: plan validation → ToolBroker authorization → ToolExecutor execution.
+
+**Flow for each step:**
+1. Validate plan structure
+2. Authorize step through ToolBroker against policy
+3. If denied by policy → skip (receipt written)
+4. If approval required and not approved → skip (receipt written)
+5. If approved and allowed → execute via ToolExecutor
+6. Receipt written for each step
+
+**Approval flags:**
+- `--approve <step_id>` — Approve a specific step. Can be repeated.
+- `--approve-all` — Approve all steps that require user approval.
+
+**Important:** Approval does not bypass ToolBroker. `AlwaysDeny` policy actions remain blocked regardless of `--approve-all`.
+
+**v0.1 Executable Actions:** Only FilesList, DesktopNotify, ModelChat execute. FilesMove, FilesWrite, FilesDelete, ShellRunSandboxed are refused.
+
+**Receipts:** Written to `~/.local/share/osai/receipts/apply/` (or custom via `--receipts-dir`). Receipt contains plan_id, policy_path, step counts, dry_run flag — but no prompt content or secrets.
+
 ### Policy Commands
 
 #### Validate a policy
