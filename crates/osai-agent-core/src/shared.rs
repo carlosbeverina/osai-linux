@@ -1,0 +1,159 @@
+//! Shared types and utilities for chat, ask, and apply operations.
+
+use osai_plan_dsl::{OsaiPlan, PlanStep};
+use osai_toolbroker::ToolRequest;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use uuid::Uuid;
+
+// ============================================================================
+// Request/Response Types (shared between chat, ask, apply)
+// ============================================================================
+
+/// Chat request sent to Model Router.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    pub temperature: f32,
+    pub metadata: ChatMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMetadata {
+    pub privacy: String,
+}
+
+/// Chat response from Model Router.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatResponse {
+    pub id: String,
+    pub model: String,
+    pub choices: Vec<ChatChoice>,
+    pub usage: Option<ChatUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatChoice {
+    pub message: ChatChoiceMessage,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatChoiceMessage {
+    pub role: String,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatUsage {
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub total_tokens: Option<u32>,
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Validates that a URL is loopback-only (127.0.0.1 or localhost).
+pub fn is_loopback_url(url: &str) -> bool {
+    if let Ok(parsed) = url::Url::parse(url) {
+        if parsed.scheme() != "http" {
+            return false;
+        }
+        match parsed.host_str() {
+            Some("localhost") | Some("127.0.0.1") => true,
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
+/// Converts a plan step to a ToolRequest for authorization/execution.
+pub fn step_to_request(plan: &OsaiPlan, step: &PlanStep) -> ToolRequest {
+    let mut request = ToolRequest::new(&plan.actor, step.action.clone(), &step.description)
+        .with_plan_id(plan.id)
+        .with_step_id(&step.id)
+        .with_inputs(step.inputs.clone())
+        .with_risk(plan.risk.clone());
+
+    // Set request ID to link receipt to step
+    request.id = Uuid::new_v4();
+
+    request
+}
+
+/// Sanitizes YAML response by stripping markdown fences.
+pub fn sanitize_yaml_response(content: &str) -> String {
+    let trimmed = content.trim();
+    // Strip markdown fences if present
+    if trimmed.starts_with("```yaml") || trimmed.starts_with("```") {
+        let without_fence = trimmed
+            .trim_start_matches("```yaml")
+            .trim_start_matches("```")
+            .trim_start_matches('\n');
+        // Find closing fence
+        if let Some(end) = without_fence.find("```") {
+            return without_fence[..end].trim_end().to_string();
+        }
+        return without_fence.to_string();
+    }
+    trimmed.to_string()
+}
+
+/// Creates a slug from a request string for plan filenames.
+pub fn slug_from_request(request: &str) -> String {
+    request
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("-")
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_lowercase()
+}
+
+/// Default receipts directory for chat.
+pub fn default_chat_receipts_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("osai")
+        .join("receipts")
+        .join("chat")
+}
+
+/// Default receipts directory for ask.
+pub fn default_ask_receipts_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("osai")
+        .join("receipts")
+        .join("ask")
+}
+
+/// Default receipts directory for apply.
+pub fn default_apply_receipts_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("osai")
+        .join("receipts")
+        .join("apply")
+}

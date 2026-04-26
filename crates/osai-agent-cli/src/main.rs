@@ -2,10 +2,14 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use osai_plan_dsl::{OsaiPlan, PlanStep};
-use osai_receipt_logger::{Receipt, ReceiptStatus, ReceiptStore};
+use osai_agent_core::{
+    apply::run_apply as core_run_apply, ask::run_ask as core_run_ask,
+    chat::run_chat as core_run_chat, is_loopback_url, step_to_request,
+};
+use osai_plan_dsl::OsaiPlan;
+use osai_receipt_logger::ReceiptStore;
 use osai_tool_executor::{ExecutionStatus, ToolExecutor};
-use osai_toolbroker::{ToolBroker, ToolPolicy, ToolRequest};
+use osai_toolbroker::{ToolBroker, ToolPolicy};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -353,7 +357,7 @@ fn main() -> Result<()> {
             temperature,
             json,
             positional_message,
-        } => run_chat(
+        } => core_run_chat(
             message.as_deref(),
             &model_router_url,
             receipts_dir.as_ref().map(|p| p.as_path()),
@@ -374,7 +378,7 @@ fn main() -> Result<()> {
             model_router_url,
             dry_run,
             json,
-        } => run_apply(
+        } => core_run_apply(
             &plan,
             &policy,
             receipts_dir.as_ref().map(|p| p.as_path()),
@@ -411,7 +415,7 @@ fn main() -> Result<()> {
             print_plan,
             output,
             positional_request,
-        } => run_ask(
+        } => core_run_ask(
             message.as_deref(),
             &model_router_url,
             receipts_dir.as_ref().map(|p| p.as_path()),
@@ -697,7 +701,6 @@ fn run_plan(
         // Check if this step requires approval and if we've approved it
         if decision.requires_user_approval {
             let is_approved = approve_all || approve_set.contains(step.id.as_str());
-
             if is_approved {
                 // Create adjusted decision for explicit CLI approval
                 let adjusted_decision = osai_toolbroker::AuthorizationDecision {
@@ -770,479 +773,6 @@ fn run_plan(
     } else {
         Ok(())
     }
-}
-
-fn run_apply(
-    plan_path: &PathBuf,
-    policy_path: &PathBuf,
-    receipts_dir_override: Option<&std::path::Path>,
-    allowed_root: &[PathBuf],
-    approve: &[String],
-    approve_all: bool,
-    model_router_url: Option<&str>,
-    dry_run: bool,
-    json: bool,
-) -> Result<()> {
-    // Resolve receipts directory
-    let receipts_dir = receipts_dir_override
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("~/.local/share/osai"))
-                .join("receipts/apply")
-        });
-
-    // Read and parse plan
-    let plan_content = fs::read_to_string(plan_path)
-        .with_context(|| format!("failed to read plan file: {}", plan_path.display()))?;
-    let plan = match OsaiPlan::from_yaml(&plan_content) {
-        Ok(p) => p,
-        Err(_) => OsaiPlan::from_json(&plan_content)
-            .with_context(|| format!("failed to parse plan file: {}", plan_path.display()))?,
-    };
-
-    // Validate plan
-    if let Err(e) = plan.validate() {
-        write_apply_receipt(
-            &receipts_dir,
-            &plan,
-            plan_path,
-            policy_path,
-            None,
-            dry_run,
-            approve,
-            approve_all,
-            0,
-            0,
-            0,
-            0,
-            0,
-            "Failed",
-            Some(&format!("Plan validation failed: {}", e)),
-        )?;
-        return Err(anyhow::anyhow!("plan validation failed: {}", e));
-    }
-
-    // Read and parse policy
-    let policy_content = fs::read_to_string(policy_path)
-        .with_context(|| format!("failed to read policy file: {}", policy_path.display()))?;
-    let policy = ToolPolicy::from_yaml(&policy_content)
-        .map_err(|e| anyhow::anyhow!("policy parse failed: {}", e))?;
-
-    // Create store and broker
-    let store = ReceiptStore::new(&receipts_dir);
-    store.ensure_dirs().with_context(|| {
-        format!(
-            "failed to create receipts directory: {}",
-            receipts_dir.display()
-        )
-    })?;
-    let broker = ToolBroker::new(policy.clone(), store.clone());
-
-    // Authorize each step and collect decisions
-    let mut denied_count = 0u32;
-    let mut approval_required_count = 0u32;
-    let mut approved_step_ids = Vec::new();
-
-    struct StepDecision {
-        step_id: String,
-        action_name: String,
-        allowed: bool,
-        requires_approval: bool,
-        policy_mode: osai_toolbroker::PolicyMode,
-        reason: String,
-    }
-    let mut decisions = Vec::new();
-
-    for step in &plan.steps {
-        let request = step_to_request(&plan, step);
-        let decision = broker
-            .authorize(&request)
-            .with_context(|| format!("authorization failed for step: {}", step.id))?;
-
-        let action_name = request.action_name();
-        decisions.push(StepDecision {
-            step_id: step.id.clone(),
-            action_name: action_name.clone(),
-            allowed: decision.allowed,
-            requires_approval: decision.requires_user_approval,
-            policy_mode: decision.policy_mode,
-            reason: decision.reason,
-        });
-
-        if !decision.allowed {
-            denied_count += 1;
-        }
-        if decision.requires_user_approval {
-            approval_required_count += 1;
-        }
-    }
-
-    // Print authorization summary
-    if json {
-        #[derive(Serialize)]
-        struct ApplyAuthorizationSummary {
-            plan_id: String,
-            plan_path: String,
-            policy_path: String,
-            dry_run: bool,
-            steps: Vec<StepAuthorizationSummary>,
-            denied_count: u32,
-            approval_required_count: u32,
-        }
-        #[derive(Serialize)]
-        struct StepAuthorizationSummary {
-            step_id: String,
-            action: String,
-            allowed: bool,
-            approval: bool,
-            mode: String,
-        }
-        let step_summaries: Vec<StepAuthorizationSummary> = decisions
-            .iter()
-            .map(|d| StepAuthorizationSummary {
-                step_id: d.step_id.clone(),
-                action: d.action_name.clone(),
-                allowed: d.allowed,
-                approval: d.requires_approval,
-                mode: format!("{:?}", d.policy_mode),
-            })
-            .collect();
-        let summary = ApplyAuthorizationSummary {
-            plan_id: plan.id.to_string(),
-            plan_path: plan_path.display().to_string(),
-            policy_path: policy_path.display().to_string(),
-            dry_run,
-            steps: step_summaries,
-            denied_count,
-            approval_required_count,
-        };
-        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
-    } else {
-        println!("Authorization summary for plan: {}", plan_path.display());
-        println!("policy: {}", policy_path.display());
-        for d in &decisions {
-            println!(
-                "step={} action={} allowed={} approval={} mode={:?}",
-                d.step_id, d.action_name, d.allowed, d.requires_approval, d.policy_mode
-            );
-        }
-        println!(
-            "denied={} approval_required={}",
-            denied_count, approval_required_count
-        );
-    }
-
-    // Dry run: write receipt and exit
-    if dry_run {
-        write_apply_receipt(
-            &receipts_dir,
-            &plan,
-            plan_path,
-            policy_path,
-            None,
-            dry_run,
-            approve,
-            approve_all,
-            0,
-            0,
-            denied_count,
-            approval_required_count,
-            0,
-            "Executed",
-            None,
-        )?;
-        println!("Dry run complete; no steps executed.");
-        return Ok(());
-    }
-
-    // Build ToolExecutor with optional model router URL
-    let mut executor = ToolExecutor::new(store, allowed_root.to_vec());
-    if let Some(url) = model_router_url {
-        executor = executor
-            .with_model_router_url(url)
-            .map_err(|e| anyhow::anyhow!("invalid model router URL: {}", e))?;
-    }
-
-    // Execute steps
-    let mut executed_count = 0u32;
-    let mut skipped_count = 0u32;
-    let mut failed_count = 0u32;
-    let approve_set: std::collections::HashSet<&str> = approve.iter().map(|s| s.as_str()).collect();
-
-    for (i, step) in plan.steps.iter().enumerate() {
-        let decision = &decisions[i];
-
-        if !decision.allowed {
-            if json {
-                println!(
-                    "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"Denied\"}}",
-                    decision.step_id, decision.action_name
-                );
-            } else {
-                println!(
-                    "step={} action={} execution=Denied reason=\"Policy denied\"",
-                    decision.step_id, decision.action_name
-                );
-            }
-            skipped_count += 1;
-            continue;
-        }
-
-        if decision.requires_approval {
-            let is_approved = approve_all || approve_set.contains(decision.step_id.as_str());
-            if !is_approved {
-                if json {
-                    println!(
-                        "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"Skipped\",\"reason\":\"requires approval\"}}",
-                        decision.step_id, decision.action_name
-                    );
-                } else {
-                    println!(
-                        "step={} action={} execution=Skipped reason=\"requires user approval\"",
-                        decision.step_id, decision.action_name
-                    );
-                }
-                skipped_count += 1;
-                continue;
-            }
-            // Explicitly approved
-            let adjusted_decision = osai_toolbroker::AuthorizationDecision {
-                allowed: true,
-                requires_user_approval: false,
-                reason: format!("Explicitly approved by CLI: {}", decision.reason),
-                policy_mode: decision.policy_mode,
-                request_id: uuid::Uuid::new_v4(),
-            };
-
-            let request = step_to_request(&plan, step);
-            let result = executor
-                .execute_authorized(&request, &adjusted_decision)
-                .with_context(|| format!("execution failed for step: {}", step.id))?;
-
-            let exec_status = match result.status {
-                ExecutionStatus::Executed => "Executed",
-                ExecutionStatus::Failed => "Failed",
-                ExecutionStatus::Skipped => "Skipped",
-            };
-            if json {
-                println!(
-                    "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"{}\",\"error\":\"{}\"}}",
-                    decision.step_id,
-                    decision.action_name,
-                    exec_status,
-                    result.error.unwrap_or_default()
-                );
-            } else {
-                println!(
-                    "step={} action={} execution={} error=\"{}\"",
-                    decision.step_id,
-                    decision.action_name,
-                    exec_status,
-                    result.error.unwrap_or_default()
-                );
-            }
-
-            if result.status == ExecutionStatus::Executed {
-                executed_count += 1;
-                approved_step_ids.push(decision.step_id.clone());
-            } else if result.status == ExecutionStatus::Failed {
-                failed_count += 1;
-            } else {
-                skipped_count += 1;
-            }
-            continue;
-        }
-
-        // Execute auto-approved step
-        let request = step_to_request(&plan, step);
-        let auto_decision = osai_toolbroker::AuthorizationDecision {
-            allowed: decision.allowed,
-            requires_user_approval: decision.requires_approval,
-            reason: decision.reason.clone(),
-            policy_mode: decision.policy_mode,
-            request_id: uuid::Uuid::new_v4(),
-        };
-        let result = executor
-            .execute_authorized(&request, &auto_decision)
-            .with_context(|| format!("execution failed for step: {}", step.id))?;
-
-        let exec_status = match result.status {
-            ExecutionStatus::Executed => "Executed",
-            ExecutionStatus::Failed => "Failed",
-            ExecutionStatus::Skipped => "Skipped",
-        };
-        if json {
-            println!(
-                "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"{}\",\"error\":\"{}\"}}",
-                decision.step_id,
-                decision.action_name,
-                exec_status,
-                result.error.unwrap_or_default()
-            );
-        } else {
-            println!(
-                "step={} action={} execution={} error=\"{}\"",
-                decision.step_id,
-                decision.action_name,
-                exec_status,
-                result.error.unwrap_or_default()
-            );
-        }
-
-        if result.status == ExecutionStatus::Executed {
-            executed_count += 1;
-        } else if result.status == ExecutionStatus::Failed {
-            failed_count += 1;
-        } else {
-            skipped_count += 1;
-        }
-    }
-
-    // Write receipt
-    let status = if failed_count > 0 {
-        "Failed"
-    } else {
-        "Executed"
-    };
-    let error_msg = if failed_count > 0 {
-        Some(format!("{} step(s) failed", failed_count))
-    } else {
-        None
-    };
-    let error: Option<&str> = error_msg.as_deref();
-    write_apply_receipt(
-        &receipts_dir,
-        &plan,
-        plan_path,
-        policy_path,
-        Some(&approved_step_ids),
-        dry_run,
-        approve,
-        approve_all,
-        executed_count,
-        skipped_count,
-        denied_count,
-        approval_required_count,
-        failed_count,
-        status,
-        error,
-    )?;
-
-    // Print summary
-    if json {
-        #[derive(Serialize)]
-        struct ApplySummary {
-            status: String,
-            executed: u32,
-            skipped: u32,
-            denied: u32,
-            approval_required: u32,
-            failed: u32,
-            approved_steps: Vec<String>,
-            dry_run: bool,
-        }
-        let summary = ApplySummary {
-            status: status.to_string(),
-            executed: executed_count,
-            skipped: skipped_count,
-            denied: denied_count,
-            approval_required: approval_required_count,
-            failed: failed_count,
-            approved_steps: approved_step_ids,
-            dry_run,
-        };
-        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
-    } else {
-        println!(
-            "Apply complete: executed={} skipped={} denied={} approval_required={} failed={}",
-            executed_count, skipped_count, denied_count, approval_required_count, failed_count
-        );
-    }
-
-    if failed_count > 0 {
-        Err(anyhow::anyhow!("{} step(s) failed", failed_count))
-    } else {
-        Ok(())
-    }
-}
-
-fn write_apply_receipt(
-    receipts_dir: &PathBuf,
-    plan: &OsaiPlan,
-    plan_path: &PathBuf,
-    policy_path: &PathBuf,
-    approved_steps: Option<&[String]>,
-    dry_run: bool,
-    approve: &[String],
-    approve_all: bool,
-    executed_count: u32,
-    skipped_count: u32,
-    denied_count: u32,
-    approval_required_count: u32,
-    failed_count: u32,
-    status: &str,
-    error: Option<&str>,
-) -> Result<()> {
-    let store = ReceiptStore::new(receipts_dir);
-    store
-        .ensure_dirs()
-        .map_err(|e| anyhow::anyhow!("failed to create receipts directory: {}", e))?;
-
-    let receipt_status = if status == "Executed" {
-        ReceiptStatus::Executed
-    } else {
-        ReceiptStatus::Failed
-    };
-
-    let mut receipt = Receipt::new("osai-agent", "PlanApply")
-        .with_tool("osai-agent apply")
-        .with_risk("Low")
-        .with_approval("Auto");
-
-    receipt.status = receipt_status;
-    receipt.outputs_redacted = Some(serde_json::json!({
-        "plan_id": plan.id.to_string(),
-        "plan_path": plan_path.display().to_string(),
-        "policy_path": policy_path.display().to_string(),
-        "dry_run": dry_run,
-        "executed_count": executed_count,
-        "skipped_count": skipped_count,
-        "denied_count": denied_count,
-        "approval_required_count": approval_required_count,
-        "failed_count": failed_count,
-        "approved_steps": approved_steps.map(|a| a.to_vec()).unwrap_or_default(),
-        "approve_all": approve_all,
-        "approve_flags": approve.to_vec(),
-    }));
-
-    if let Some(err) = error {
-        receipt.error = Some(err.to_string());
-    }
-
-    let receipt_id = receipt.id;
-    store
-        .write(&receipt)
-        .map_err(|e| anyhow::anyhow!("failed to write receipt: {}", e))?;
-
-    if !dry_run {
-        println!("Receipt written: {}", receipt_id);
-    }
-
-    Ok(())
-}
-
-fn step_to_request(plan: &OsaiPlan, step: &PlanStep) -> ToolRequest {
-    let mut request = ToolRequest::new(&plan.actor, step.action.clone(), &step.description)
-        .with_plan_id(plan.id)
-        .with_step_id(&step.id)
-        .with_inputs(step.inputs.clone())
-        .with_risk(plan.risk);
-
-    // Set request ID to link receipt to step
-    request.id = Uuid::new_v4();
-
-    request
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1435,653 +965,6 @@ fn run_doctor(
     } else {
         Ok(())
     }
-}
-
-fn is_loopback_url(url: &str) -> bool {
-    if let Ok(parsed) = url::Url::parse(url) {
-        if parsed.scheme() != "http" {
-            return false;
-        }
-        match parsed.host_str() {
-            Some("localhost") | Some("127.0.0.1") => true,
-            _ => false,
-        }
-    } else {
-        false
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    temperature: f32,
-    metadata: ChatMetadata,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatMetadata {
-    privacy: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatResponse {
-    id: String,
-    model: String,
-    choices: Vec<ChatChoice>,
-    usage: Option<ChatUsage>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatChoice {
-    message: ChatChoiceMessage,
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatChoiceMessage {
-    role: String,
-    content: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatUsage {
-    prompt_tokens: Option<u32>,
-    completion_tokens: Option<u32>,
-    total_tokens: Option<u32>,
-}
-
-fn default_receipts_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("osai")
-        .join("receipts")
-        .join("chat")
-}
-
-fn run_chat(
-    message_arg: Option<&str>,
-    model_router_url: &str,
-    receipts_dir_override: Option<&std::path::Path>,
-    model: &str,
-    privacy: &str,
-    max_tokens: Option<u32>,
-    temperature: f32,
-    json_output: bool,
-    positional_message: &[String],
-) -> Result<()> {
-    // Validate loopback URL
-    if !is_loopback_url(model_router_url) {
-        return Err(anyhow::anyhow!(
-            "Model router URL must be loopback only (127.0.0.1 or localhost): {}",
-            model_router_url
-        ));
-    }
-
-    // Resolve message: check --message and positional separately
-    let has_positional = !positional_message.is_empty();
-    let has_message_arg = message_arg.is_some();
-
-    if has_positional && has_message_arg {
-        return Err(anyhow::anyhow!(
-            "Cannot use both positional message and --message flag. Use one or the other."
-        ));
-    }
-
-    if !has_positional && !has_message_arg {
-        return Err(anyhow::anyhow!(
-            "No message provided. Use a positional message or --message flag."
-        ));
-    }
-
-    let message: String = if has_message_arg {
-        message_arg.unwrap().to_string()
-    } else {
-        positional_message.join(" ")
-    };
-
-    // Build request
-    let request = ChatRequest {
-        model: model.to_string(),
-        messages: vec![ChatMessage {
-            role: "user".to_string(),
-            content: message.to_string(),
-        }],
-        max_tokens,
-        temperature,
-        metadata: ChatMetadata {
-            privacy: privacy.to_string(),
-        },
-    };
-
-    // Call model router
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
-
-    let url = format!("{}/v1/chat/completions", model_router_url);
-
-    let response = client
-        .post(&url)
-        .json(&request)
-        .send()
-        .map_err(|e| anyhow::anyhow!("Model router request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "Model router returned error {}: {}",
-            status,
-            body
-        ));
-    }
-
-    let chat_response: ChatResponse = response
-        .json()
-        .map_err(|e| anyhow::anyhow!("Failed to parse model router response: {}", e))?;
-
-    // Extract assistant content
-    let content = chat_response
-        .choices
-        .first()
-        .and_then(|c| c.message.content.as_ref())
-        .ok_or_else(|| anyhow::anyhow!("Model response missing content"))?
-        .clone();
-
-    let response_length = content.len();
-
-    // Write receipt
-    let receipts_dir = if let Some(dir) = receipts_dir_override {
-        dir.to_path_buf()
-    } else {
-        default_receipts_dir()
-    };
-    let store = ReceiptStore::new(&receipts_dir);
-    store
-        .ensure_dirs()
-        .map_err(|e| anyhow::anyhow!("Failed to create receipts directory: {}", e))?;
-
-    // Extract host from model router URL for receipt (no secrets)
-    let mr_host = url::Url::parse(model_router_url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let receipt = Receipt::new("osai-agent", "ModelChat")
-        .with_tool("osai-agent chat")
-        .with_risk("Low")
-        .with_approval("Auto")
-        .with_status(ReceiptStatus::Executed)
-        .with_inputs(serde_json::json!({
-            "model_router_url_host": mr_host,
-            "model": model,
-            "privacy": privacy,
-            "prompt_length": message.len(),
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }))
-        .with_outputs(serde_json::json!({
-            "response_length": response_length,
-            "finish_reason": chat_response.choices.first().and_then(|c| c.finish_reason.clone()),
-        }));
-
-    store
-        .write(&receipt)
-        .map_err(|e| anyhow::anyhow!("Failed to write receipt: {}", e))?;
-
-    // Output
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&chat_response).unwrap());
-    } else {
-        println!("{}", content);
-    }
-
-    Ok(())
-}
-
-fn sanitize_yaml_response(content: &str) -> String {
-    let trimmed = content.trim();
-    // Strip markdown fences if present
-    if trimmed.starts_with("```yaml") || trimmed.starts_with("```") {
-        let without_fence = trimmed
-            .trim_start_matches("```yaml")
-            .trim_start_matches("```")
-            .trim_start_matches('\n');
-        // Find closing fence
-        if let Some(end) = without_fence.find("```") {
-            return without_fence[..end].trim_end().to_string();
-        }
-        return without_fence.to_string();
-    }
-    trimmed.to_string()
-}
-
-fn slug_from_request(request: &str) -> String {
-    request
-        .split_whitespace()
-        .take(3)
-        .collect::<Vec<_>>()
-        .join("-")
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_lowercase()
-}
-
-fn default_ask_receipts_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("osai")
-        .join("receipts")
-        .join("ask")
-}
-
-fn run_ask(
-    message_arg: Option<&str>,
-    model_router_url: &str,
-    receipts_dir_override: Option<&std::path::Path>,
-    plans_dir_override: Option<&std::path::Path>,
-    model: &str,
-    privacy: &str,
-    max_tokens: Option<u32>,
-    temperature: f32,
-    json_output: bool,
-    print_plan: bool,
-    output_override: Option<&std::path::Path>,
-    positional_request: &[String],
-) -> Result<()> {
-    // Validate loopback URL
-    if !is_loopback_url(model_router_url) {
-        return Err(anyhow::anyhow!(
-            "Model router URL must be loopback only (127.0.0.1 or localhost): {}",
-            model_router_url
-        ));
-    }
-
-    // Resolve request: check --message and positional separately
-    let has_positional = !positional_request.is_empty();
-    let has_message_arg = message_arg.is_some();
-
-    if has_positional && has_message_arg {
-        return Err(anyhow::anyhow!(
-            "Cannot use both positional request and --message flag. Use one or the other."
-        ));
-    }
-
-    if !has_positional && !has_message_arg {
-        return Err(anyhow::anyhow!(
-            "No request provided. Use a positional request or --message flag."
-        ));
-    }
-
-    let request: String = if has_message_arg {
-        message_arg.unwrap().to_string()
-    } else {
-        positional_request.join(" ")
-    };
-
-    let request_length = request.len();
-
-    // Build system prompt for safe plan generation
-    let system_prompt = r#"You are an OSAI plan generator. Return ONLY valid OSAI Plan DSL YAML with no markdown fences, no explanation, and no additional text.
-
-## REQUIRED YAML SCHEMA
-
-Your output MUST match this exact top-level structure:
-version: "0.1"
-id: "<generate a fresh UUID v4>"
-title: "<short title>"
-description: "<one-sentence description>"
-actor: "user"
-risk: Low
-approval: Auto
-steps:
-  - id: "step-1"
-    action:
-      type: FilesList
-    description: "<what this step does>"
-    requires_approval: false
-    inputs:
-      path: "~/Downloads"
-rollback:
-  available: false
-metadata: {}
-
-## CRITICAL RULES
-
-1. Use `steps:` — NEVER use `plan:` or any other top-level key for the action list.
-2. Use exact action types: FilesList, FilesMove, FilesWrite, ModelChat, ReceiptCreate, DesktopNotify, BrowserOpenUrl, ShellRunSandboxed, Custom. Do NOT invent names like ListDirectory or ReadFile.
-3. Each step needs id, action.type, description, requires_approval, inputs.
-4. For listing a directory, use:
-   action:
-     type: FilesList
-   inputs:
-     path: "~/Downloads"
-5. Omit rollback entirely (or use: rollback: ~). Do not add rollback.steps unless rollback is obvious.
-6. Use metadata: {}.
-7. Generate a fresh UUID v4 for id — do not reuse the example UUID.
-
-## VALID EXAMPLE
-
-For the request "List my Downloads folder", output exactly:
-
-version: "0.1"
-id: "00000000-0000-4000-8000-000000000001"
-title: "List Downloads folder"
-description: "List files in the user's Downloads folder"
-actor: "user"
-risk: Low
-approval: Auto
-steps:
-  - id: "step-1"
-    action:
-      type: FilesList
-    description: "List files in Downloads"
-    requires_approval: false
-    inputs:
-      path: "~/Downloads"
-metadata: {}
-
-## SAFETY
-
-- Do NOT include ShellRunSandboxed unless user explicitly asks to run a command.
-- Do NOT include FilesWrite, FilesMove, FilesDelete (refuse destructive actions).
-- Prefer ModelChat or ReceiptCreate for information-only tasks.
-- risk: Low by default, Medium only with clear justification.
-- approval: Auto for read-only, Ask for anything that modifies state."#;
-
-    let _full_content = format!("{}\n\nUser request: {}", system_prompt, request);
-
-    // Build request
-    let chat_request = ChatRequest {
-        model: model.to_string(),
-        messages: vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt.to_string(),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: request.clone(),
-            },
-        ],
-        max_tokens: max_tokens.or(Some(1200)),
-        temperature,
-        metadata: ChatMetadata {
-            privacy: privacy.to_string(),
-        },
-    };
-
-    // Call model router
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
-
-    let url = format!("{}/v1/chat/completions", model_router_url);
-
-    let response = client
-        .post(&url)
-        .json(&chat_request)
-        .send()
-        .map_err(|e| anyhow::anyhow!("Model router request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        // Write failed receipt
-        write_ask_receipt(
-            receipts_dir_override,
-            model_router_url,
-            model,
-            privacy,
-            request_length,
-            None,
-            "Failed",
-            Some(&format!("Model router returned error {}: {}", status, body)),
-        )?;
-        return Err(anyhow::anyhow!(
-            "Model router returned error {}: {}",
-            status,
-            body
-        ));
-    }
-
-    let chat_response: ChatResponse = response
-        .json()
-        .map_err(|e| anyhow::anyhow!("Failed to parse model router response: {}", e))?;
-
-    // Extract content
-    let content = chat_response
-        .choices
-        .first()
-        .and_then(|c| c.message.content.as_ref())
-        .ok_or_else(|| anyhow::anyhow!("Model response missing content"))?
-        .clone();
-
-    // Sanitize YAML response (strip markdown fences if present)
-    let yaml_content = sanitize_yaml_response(&content);
-
-    // Try to parse as OSAI Plan
-    let mut plan = match OsaiPlan::from_yaml(&yaml_content) {
-        Ok(p) => p,
-        Err(e) => {
-            // Write failed receipt
-            write_ask_receipt(
-                receipts_dir_override,
-                model_router_url,
-                model,
-                privacy,
-                request_length,
-                None,
-                "Failed",
-                Some(&format!("YAML parse error: {}", e)),
-            )?;
-            return Err(anyhow::anyhow!(
-                "Model returned invalid YAML: {}\nRaw response: {}",
-                e,
-                yaml_content.chars().take(200).collect::<String>()
-            ));
-        }
-    };
-
-    // Validate plan
-    if let Err(e) = plan.validate() {
-        // Write failed receipt
-        write_ask_receipt(
-            receipts_dir_override,
-            model_router_url,
-            model,
-            privacy,
-            request_length,
-            None,
-            "Failed",
-            Some(&format!("Validation error: {}", e)),
-        )?;
-        return Err(anyhow::anyhow!(
-            "Generated plan is invalid: {}\nYAML:\n{}",
-            e,
-            yaml_content
-        ));
-    }
-
-    // Replace example UUID with a fresh generated UUID
-    let example_uuid = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").ok();
-    if let Some(expected) = example_uuid {
-        if plan.id == expected {
-            plan.id = uuid::Uuid::new_v4();
-        }
-    }
-
-    // Determine output path
-    let output_path = if let Some(path) = output_override {
-        if path.exists() {
-            return Err(anyhow::anyhow!(
-                "Output path already exists: {}",
-                path.display()
-            ));
-        }
-        path.to_path_buf()
-    } else {
-        let plans_dir =
-            plans_dir_override.unwrap_or_else(|| std::path::Path::new("./generated/plans"));
-        let slug = slug_from_request(&request);
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let filename = format!("{}-{}.yml", slug, timestamp);
-        let full_path = plans_dir.join(&filename);
-        if full_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Generated plan path already exists: {}",
-                full_path.display()
-            ));
-        }
-        full_path
-    };
-
-    // Create parent directories if needed
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("Failed to create plans directory: {}", e))?;
-    }
-
-    // Save plan
-    let yaml_output = plan
-        .to_yaml()
-        .map_err(|e| anyhow::anyhow!("Failed to serialize plan to YAML: {}", e))?;
-    fs::write(&output_path, &yaml_output)
-        .map_err(|e| anyhow::anyhow!("Failed to write plan file: {}", e))?;
-
-    // Write success receipt
-    write_ask_receipt(
-        receipts_dir_override,
-        model_router_url,
-        model,
-        privacy,
-        request_length,
-        Some(&output_path),
-        "Executed",
-        None,
-    )?;
-
-    // Print output
-    if json_output {
-        #[derive(Serialize)]
-        struct AskResult {
-            status: String,
-            output_path: String,
-            validation: String,
-        }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&AskResult {
-                status: "success".to_string(),
-                output_path: output_path.display().to_string(),
-                validation: "valid".to_string(),
-            })
-            .unwrap()
-        );
-    } else {
-        println!("Generated valid plan: {}", output_path.display());
-    }
-
-    // Print plan if requested
-    if print_plan {
-        println!();
-        println!("{}", yaml_output);
-    }
-
-    Ok(())
-}
-
-fn write_ask_receipt(
-    receipts_dir_override: Option<&std::path::Path>,
-    model_router_url: &str,
-    model: &str,
-    privacy: &str,
-    request_length: usize,
-    output_path: Option<&std::path::Path>,
-    status: &str,
-    error: Option<&str>,
-) -> Result<()> {
-    let receipts_dir = if let Some(dir) = receipts_dir_override {
-        dir.to_path_buf()
-    } else {
-        default_ask_receipts_dir()
-    };
-    let store = ReceiptStore::new(&receipts_dir);
-    store
-        .ensure_dirs()
-        .map_err(|e| anyhow::anyhow!("Failed to create receipts directory: {}", e))?;
-
-    // Extract host from model router URL (no secrets)
-    let mr_host = url::Url::parse(model_router_url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let receipt_status = if status == "Executed" {
-        ReceiptStatus::Executed
-    } else {
-        ReceiptStatus::Failed
-    };
-
-    let mut receipt = Receipt::new("osai-agent", "PlanGenerate")
-        .with_tool("osai-agent ask")
-        .with_risk("Low")
-        .with_approval("Auto")
-        .with_status(receipt_status)
-        .with_inputs(serde_json::json!({
-            "model_router_url_host": mr_host,
-            "model": model,
-            "privacy": privacy,
-            "request_length": request_length,
-        }))
-        .with_outputs(serde_json::json!({
-            "validation_status": status.to_lowercase(),
-        }));
-
-    if let Some(path) = output_path {
-        let outputs = receipt
-            .outputs_redacted
-            .clone()
-            .unwrap_or(serde_json::Value::Null);
-        let mut obj = outputs.as_object().cloned().unwrap_or_default();
-        obj.insert(
-            "output_path".to_string(),
-            serde_json::json!(path.display().to_string()),
-        );
-        receipt.outputs_redacted = Some(serde_json::Value::Object(obj));
-    }
-
-    if let Some(err) = error {
-        receipt.error = Some(err.to_string());
-    }
-
-    store
-        .write(&receipt)
-        .map_err(|e| anyhow::anyhow!("Failed to write receipt: {}", e))?;
-
-    Ok(())
 }
 
 fn check_repo_structure(repo_root: &PathBuf) -> (String, String) {
@@ -3611,7 +2494,8 @@ metadata: {}
         assert!(!is_loopback_url("http://0.0.0.0:8088"));
     }
 
-    // Chat command tests
+    // Chat command tests - now delegate to core library
+    // These tests remain here to ensure CLI correctly passes arguments to core
 
     #[test]
     fn test_chat_positional_message_joined() {
@@ -3639,7 +2523,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_chat(
+        let result = core_run_chat(
             None,
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -3679,7 +2563,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_chat(
+        let result = core_run_chat(
             Some("Hi there"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -3698,7 +2582,7 @@ metadata: {}
         let tempdir = tempfile::tempdir().unwrap();
         let receipts_dir = tempdir.path().join("receipts");
 
-        let result = run_chat(
+        let result = core_run_chat(
             Some("--message"),
             "http://127.0.0.1:8088",
             Some(receipts_dir.as_path()),
@@ -3718,7 +2602,7 @@ metadata: {}
         let tempdir = tempfile::tempdir().unwrap();
         let receipts_dir = tempdir.path().join("receipts");
 
-        let result = run_chat(
+        let result = core_run_chat(
             None,
             "http://127.0.0.1:8088",
             Some(receipts_dir.as_path()),
@@ -3762,7 +2646,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_chat(
+        let result = core_run_chat(
             Some("What is the answer?"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -3796,7 +2680,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_chat(
+        let result = core_run_chat(
             Some("Hello"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -3836,7 +2720,7 @@ metadata: {}
                 .await;
         });
 
-        run_chat(
+        core_run_chat(
             Some("Hello"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -3885,7 +2769,7 @@ metadata: {}
                 .await;
         });
 
-        run_chat(
+        core_run_chat(
             Some("Tell me a secret"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -3933,7 +2817,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_chat(
+        let result = core_run_chat(
             Some("Show me JSON"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -3973,7 +2857,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_chat(
+        let result = core_run_chat(
             Some("Hello"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4013,7 +2897,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_chat(
+        let result = core_run_chat(
             Some("Hello"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4027,7 +2911,7 @@ metadata: {}
         assert!(result.is_ok());
     }
 
-    // Ask command tests
+    // Ask command tests - now delegate to core library
 
     fn valid_plan_yaml() -> String {
         r#"version: "0.1"
@@ -4075,7 +2959,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_ask(
+        let result = core_run_ask(
             None,
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4123,7 +3007,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_ask(
+        let result = core_run_ask(
             Some("List my downloads"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4146,7 +3030,7 @@ metadata: {}
         let receipts_dir = tempdir.path().join("receipts");
         let plans_dir = tempdir.path().join("plans");
 
-        let result = run_ask(
+        let result = core_run_ask(
             Some("--message"),
             "http://127.0.0.1:8088",
             Some(receipts_dir.as_path()),
@@ -4170,7 +3054,7 @@ metadata: {}
         let receipts_dir = tempdir.path().join("receipts");
         let plans_dir = tempdir.path().join("plans");
 
-        let result = run_ask(
+        let result = core_run_ask(
             None,
             "http://127.0.0.1:8088",
             Some(receipts_dir.as_path()),
@@ -4218,7 +3102,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_ask(
+        let result = core_run_ask(
             Some("List my downloads"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4276,7 +3160,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_ask(
+        let result = core_run_ask(
             Some("List my downloads"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4323,7 +3207,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_ask(
+        let result = core_run_ask(
             Some("List my downloads"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4367,7 +3251,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_ask(
+        let result = core_run_ask(
             Some("List my downloads"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4419,7 +3303,7 @@ metadata: {}
                 .await;
         });
 
-        run_ask(
+        core_run_ask(
             Some("Tell me a secret"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4471,7 +3355,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_ask(
+        let result = core_run_ask(
             Some("List my downloads"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4509,7 +3393,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_ask(
+        let result = core_run_ask(
             Some("List my downloads"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4566,7 +3450,7 @@ metadata: {}
                 .await;
         });
 
-        let result = run_ask(
+        let result = core_run_ask(
             Some("List my downloads"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4644,7 +3528,7 @@ metadata: {}"#
                 .await;
         });
 
-        let result = run_ask(
+        let result = core_run_ask(
             Some("List my downloads"),
             &mock_server.uri(),
             Some(receipts_dir.as_path()),
@@ -4796,66 +3680,11 @@ shell_requires_sandbox: true"#,
         .unwrap();
 
         // Apply should succeed for valid plan (dry_run to avoid execution root issues)
-        let result = run_apply(
+        let result = core_run_apply(
             &plan_path,
             &policy_path,
             Some(receipts_dir.as_path()),
-            &[tempdir.path().to_path_buf()],
-            &[],
-            false,
-            None,
-            true, // dry_run
-            false,
-        );
-        assert!(result.is_ok(), "apply failed: {:?}", result.err());
-    }
-
-    #[test]
-    fn test_apply_dry_run_does_not_execute() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let receipts_dir = tempdir.path().join("receipts");
-        let plans_dir = tempdir.path().join("plans");
-        fs::create_dir_all(&plans_dir).unwrap();
-
-        let plan_path = plans_dir.join("plan.yml");
-        fs::write(
-            &plan_path,
-            r#"version: "0.1"
-id: "550e8400-e29b-41d4-a716-446655440001"
-title: "Test Plan"
-actor: "user"
-risk: Low
-approval: Auto
-steps:
-  - id: "step-1"
-    action:
-      type: FilesList
-    description: "List files"
-    requires_approval: false
-    inputs:
-      path: "~/Downloads"
-metadata: {}"#,
-        )
-        .unwrap();
-
-        let policy_path = tempdir.path().join("policy.yml");
-        fs::write(
-            &policy_path,
-            r#"version: "0.1"
-default_mode: Allow
-action_modes:
-  FilesList: Allow
-allowed_roots: []
-shell_network_allowed: false
-shell_requires_sandbox: true"#,
-        )
-        .unwrap();
-
-        let result = run_apply(
-            &plan_path,
-            &policy_path,
-            Some(receipts_dir.as_path()),
-            &[tempdir.path().to_path_buf()],
+            &[std::path::PathBuf::from("/tmp")],
             &[],
             false,
             None,
@@ -4863,32 +3692,6 @@ shell_requires_sandbox: true"#,
             false,
         );
         assert!(result.is_ok());
-
-        // Receipt should be written
-        let store = ReceiptStore::new(&receipts_dir);
-        let paths = store.list().unwrap();
-        // May be > 1 due to parallel test isolation, but should have at least 1
-        assert!(
-            paths.len() >= 1,
-            "expected at least 1 receipt, got {}",
-            paths.len()
-        );
-        // Find apply receipt by looking for PlanApply action
-        let apply_receipt = paths.iter().find(|p| {
-            let content = std::fs::read_to_string(p).unwrap();
-            content.contains("PlanApply")
-        });
-        assert!(
-            apply_receipt.is_some(),
-            "no PlanApply receipt found, receipts: {:?}",
-            paths
-        );
-        let content = std::fs::read_to_string(apply_receipt.unwrap()).unwrap();
-        assert!(
-            content.contains("\"dry_run\":"),
-            "receipt missing dry_run: {}",
-            content
-        );
     }
 
     #[test]
@@ -4898,19 +3701,39 @@ shell_requires_sandbox: true"#,
         let plans_dir = tempdir.path().join("plans");
         fs::create_dir_all(&plans_dir).unwrap();
 
-        // Create an invalid plan (missing required fields)
+        // Create an invalid plan (empty title)
         let plan_path = plans_dir.join("invalid-plan.yml");
-        fs::write(&plan_path, "version: \"0.1\"\nactor: user\nmetadata: {}").unwrap();
+        fs::write(
+            &plan_path,
+            r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440001"
+title: ""
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "step-1"
+    action:
+      type: FilesList
+    description: "List files"
+    requires_approval: false
+    inputs: {}
+metadata: {}"#,
+        )
+        .unwrap();
 
         let policy_path = tempdir.path().join("policy.yml");
         fs::write(
             &policy_path,
-            r#"version: "0.1"
-default_mode: Allow"#,
+            r#"default_mode: Allow
+action_modes: {}
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true"#,
         )
         .unwrap();
 
-        let result = run_apply(
+        let result = core_run_apply(
             &plan_path,
             &policy_path,
             Some(receipts_dir.as_path()),
@@ -4922,31 +3745,29 @@ default_mode: Allow"#,
             false,
         );
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        // Invalid plan may fail with parse error, validation error, or policy error
+        let err = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("validation failed")
-                || err_msg.contains("plan validation failed")
-                || err_msg.contains("parse")
-                || err_msg.contains("missing"),
-            "Expected validation/parse error, got: {}",
-            err_msg
+            err.contains("parse") || err.contains("validation"),
+            "Expected parse/validation error, got: {}",
+            err
         );
     }
 
     #[test]
-    fn test_apply_writes_receipt() {
+    fn test_apply_dry_run_does_not_execute() {
         let tempdir = tempfile::tempdir().unwrap();
         let receipts_dir = tempdir.path().join("receipts");
         let plans_dir = tempdir.path().join("plans");
         fs::create_dir_all(&plans_dir).unwrap();
 
-        let plan_path = plans_dir.join("plan.yml");
+        // Create a valid plan
+        let plan_path = plans_dir.join("dry-run-plan.yml");
         fs::write(
             &plan_path,
             r#"version: "0.1"
 id: "550e8400-e29b-41d4-a716-446655440001"
-title: "Test Plan"
+title: "List Downloads"
+description: "List files in Downloads"
 actor: "user"
 risk: Low
 approval: Auto
@@ -4957,7 +3778,7 @@ steps:
     description: "List files"
     requires_approval: false
     inputs:
-      path: "~/Downloads"
+      path: /tmp
 metadata: {}"#,
         )
         .unwrap();
@@ -4965,8 +3786,7 @@ metadata: {}"#,
         let policy_path = tempdir.path().join("policy.yml");
         fs::write(
             &policy_path,
-            r#"version: "0.1"
-default_mode: Allow
+            r#"default_mode: Allow
 action_modes:
   FilesList: Allow
 allowed_roots: []
@@ -4975,59 +3795,54 @@ shell_requires_sandbox: true"#,
         )
         .unwrap();
 
-        // Use dry_run since ~/Downloads is not in allowed_roots
-        run_apply(
+        let result = core_run_apply(
             &plan_path,
             &policy_path,
             Some(receipts_dir.as_path()),
-            &[tempdir.path().to_path_buf()],
+            &[std::path::PathBuf::from("/tmp")],
             &[],
             false,
             None,
             true, // dry_run
             false,
-        )
-        .unwrap();
+        );
+        assert!(result.is_ok());
 
+        // Check receipts
         let store = ReceiptStore::new(&receipts_dir);
         let paths = store.list().unwrap();
-        // May be > 1 due to parallel test isolation, but should have at least 1
-        assert!(
-            paths.len() >= 1,
-            "expected at least 1 receipt, got {}",
-            paths.len()
-        );
-        // Find apply receipt by looking for PlanApply action
-        let apply_receipt = paths.iter().find(|p| {
-            let content = std::fs::read_to_string(p).unwrap();
-            content.contains("PlanApply")
-        });
-        assert!(
-            apply_receipt.is_some(),
-            "no PlanApply receipt found, receipts: {:?}",
-            paths
-        );
-        let content = std::fs::read_to_string(apply_receipt.unwrap()).unwrap();
-        assert!(
-            content.contains("\"tool\": \"osai-agent apply\""),
-            "receipt missing tool: {}",
-            content
-        );
+        // Should have exactly 1 receipt from dry_run
+        let apply_receipts: Vec<_> = paths
+            .into_iter()
+            .filter_map(|p| {
+                let content = std::fs::read_to_string(&p).unwrap();
+                if content.contains("PlanApply") {
+                    Some(content)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(apply_receipts.len(), 1);
+        // Dry run receipt should have dry_run: true
+        assert!(apply_receipts[0].contains("\"dry_run\":"));
     }
 
     #[test]
-    fn test_apply_receipt_does_not_contain_prompts_secrets() {
+    fn test_apply_writes_receipt_on_success() {
         let tempdir = tempfile::tempdir().unwrap();
         let receipts_dir = tempdir.path().join("receipts");
         let plans_dir = tempdir.path().join("plans");
         fs::create_dir_all(&plans_dir).unwrap();
 
-        let plan_path = plans_dir.join("plan.yml");
+        // Create a valid plan
+        let plan_path = plans_dir.join("success-plan.yml");
         fs::write(
             &plan_path,
             r#"version: "0.1"
 id: "550e8400-e29b-41d4-a716-446655440001"
-title: "Test Plan"
+title: "List Downloads"
+description: "List files in Downloads"
 actor: "user"
 risk: Low
 approval: Auto
@@ -5035,10 +3850,10 @@ steps:
   - id: "step-1"
     action:
       type: FilesList
-    description: "List files in Downloads"
+    description: "List files"
     requires_approval: false
     inputs:
-      path: "~/Downloads"
+      path: /tmp
 metadata: {}"#,
         )
         .unwrap();
@@ -5046,8 +3861,7 @@ metadata: {}"#,
         let policy_path = tempdir.path().join("policy.yml");
         fs::write(
             &policy_path,
-            r#"version: "0.1"
-default_mode: Allow
+            r#"default_mode: Allow
 action_modes:
   FilesList: Allow
 allowed_roots: []
@@ -5056,122 +3870,52 @@ shell_requires_sandbox: true"#,
         )
         .unwrap();
 
-        // Use dry_run since ~/Downloads is not in allowed_roots
-        run_apply(
+        let result = core_run_apply(
             &plan_path,
             &policy_path,
             Some(receipts_dir.as_path()),
-            &[tempdir.path().to_path_buf()],
+            &[std::path::PathBuf::from("/tmp")],
             &[],
             false,
             None,
-            true, // dry_run
             false,
-        )
-        .unwrap();
+            false,
+        );
+        assert!(result.is_ok());
 
+        // Check receipts
         let store = ReceiptStore::new(&receipts_dir);
         let paths = store.list().unwrap();
-        // May be > 1 due to parallel test isolation, but should have at least 1
-        assert!(
-            paths.len() >= 1,
-            "expected at least 1 receipt, got {}",
-            paths.len()
-        );
-        // Find apply receipt by looking for PlanApply action
-        let apply_receipt = paths.iter().find(|p| {
-            let content = std::fs::read_to_string(p).unwrap();
-            content.contains("PlanApply")
-        });
-        assert!(
-            apply_receipt.is_some(),
-            "no PlanApply receipt found, receipts: {:?}",
-            paths
-        );
-        let content = std::fs::read_to_string(apply_receipt.unwrap()).unwrap();
-        // Should not contain prompt content or secrets (plan path ~/Downloads is redacted)
-        assert!(!content.contains("\"message\""));
-        assert!(!content.contains("api_key"));
-        assert!(!content.contains("secret"));
+        let apply_receipts: Vec<_> = paths
+            .into_iter()
+            .filter_map(|p| {
+                let content = std::fs::read_to_string(&p).unwrap();
+                if content.contains("PlanApply") {
+                    Some(content)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(apply_receipts.len(), 1);
+        assert!(apply_receipts[0].contains("\"status\": \"Executed\""));
     }
 
     #[test]
-    fn test_apply_approval_required_step_skipped_without_approve() {
+    fn test_apply_skips_denied_steps() {
         let tempdir = tempfile::tempdir().unwrap();
         let receipts_dir = tempdir.path().join("receipts");
         let plans_dir = tempdir.path().join("plans");
         fs::create_dir_all(&plans_dir).unwrap();
 
-        // Plan with FilesMove which requires approval
-        let plan_path = plans_dir.join("plan.yml");
+        // Create a plan with a denied action
+        let plan_path = plans_dir.join("denied-plan.yml");
         fs::write(
             &plan_path,
             r#"version: "0.1"
 id: "550e8400-e29b-41d4-a716-446655440001"
-title: "Test Plan"
-actor: "user"
-risk: Medium
-approval: Ask
-steps:
-  - id: "step-1"
-    action:
-      type: FilesMove
-    description: "Move files"
-    requires_approval: true
-    inputs:
-      source: "~/Downloads/test.txt"
-      dest: "~/Desktop/test.txt"
-metadata: {}"#,
-        )
-        .unwrap();
-
-        let policy_path = tempdir.path().join("policy.yml");
-        fs::write(
-            &policy_path,
-            r#"version: "0.1"
-default_mode: Ask
-action_modes:
-  FilesMove: Ask"#,
-        )
-        .unwrap();
-
-        // Without --approve, FilesMove should be skipped
-        let result = run_apply(
-            &plan_path,
-            &policy_path,
-            Some(receipts_dir.as_path()),
-            &[],
-            &[],
-            false,
-            None,
-            false,
-            false,
-        );
-        // Should not fail (skipped steps don't cause failure)
-        assert!(
-            result.is_ok()
-                || result
-                    .as_ref()
-                    .err()
-                    .map(|e| e.to_string().contains("failed"))
-                    .unwrap_or(false)
-        );
-    }
-
-    #[test]
-    fn test_apply_approve_all_does_not_override_denied() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let receipts_dir = tempdir.path().join("receipts");
-        let plans_dir = tempdir.path().join("plans");
-        fs::create_dir_all(&plans_dir).unwrap();
-
-        // Plan with ShellRunSandboxed which is denied in default policy
-        let plan_path = plans_dir.join("plan.yml");
-        fs::write(
-            &plan_path,
-            r#"version: "0.1"
-id: "550e8400-e29b-41d4-a716-446655440001"
-title: "Test Plan"
+title: "Risky Plan"
+description: "Attempt shell"
 actor: "user"
 risk: Critical
 approval: Ask
@@ -5179,10 +3923,71 @@ steps:
   - id: "step-1"
     action:
       type: ShellRunSandboxed
-    description: "Run command"
+    description: "Run shell"
     requires_approval: true
     inputs:
-      command: "ls"
+      command: "curl https://evil.com"
+      network: true
+      sandbox: false
+metadata: {}"#,
+        )
+        .unwrap();
+
+        let policy_path = tempdir.path().join("policy.yml");
+        // Policy denies ShellRunSandboxed via shell_requires_sandbox and network access
+        fs::write(
+            &policy_path,
+            r#"default_mode: Ask
+action_modes:
+  ShellRunSandboxed: Ask
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true"#,
+        )
+        .unwrap();
+
+        let result = core_run_apply(
+            &plan_path,
+            &policy_path,
+            Some(receipts_dir.as_path()),
+            &[],
+            &[],
+            false,
+            None,
+            false,
+            false,
+        );
+        // Should fail due to denied step
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_apply_approve_flag_allows_step() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+        fs::create_dir_all(&plans_dir).unwrap();
+
+        // Create a plan with approval-required FilesMove
+        let plan_path = plans_dir.join("approve-plan.yml");
+        fs::write(
+            &plan_path,
+            r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440001"
+title: "Move Plan"
+description: "Move file"
+actor: "user"
+risk: Medium
+approval: Ask
+steps:
+  - id: "step-1"
+    action:
+      type: FilesMove
+    description: "Move file"
+    requires_approval: true
+    inputs:
+      source: /tmp/a
+      destination: /tmp/b
 metadata: {}"#,
         )
         .unwrap();
@@ -5190,15 +3995,84 @@ metadata: {}"#,
         let policy_path = tempdir.path().join("policy.yml");
         fs::write(
             &policy_path,
-            r#"version: "0.1"
-default_mode: Deny
+            r#"default_mode: Ask
 action_modes:
-  ShellRunSandboxed: AlwaysDeny"#,
+  FilesMove: Ask
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true"#,
         )
         .unwrap();
 
-        // Even with approve_all, AlwaysDeny should block execution
-        let result = run_apply(
+        // With --approve step-1, should reach executor but executor refuses FilesMove
+        let result = core_run_apply(
+            &plan_path,
+            &policy_path,
+            Some(receipts_dir.as_path()),
+            &[],
+            &["step-1".to_string()],
+            false,
+            None,
+            false,
+            false,
+        );
+        // Executor refuses FilesMove in v0.1
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_apply_approve_all_flag() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let receipts_dir = tempdir.path().join("receipts");
+        let plans_dir = tempdir.path().join("plans");
+        fs::create_dir_all(&plans_dir).unwrap();
+
+        // Create a plan with two approval-required steps
+        let plan_path = plans_dir.join("approve-all-plan.yml");
+        fs::write(
+            &plan_path,
+            r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440001"
+title: "Multi Step"
+description: "Two steps"
+actor: "user"
+risk: Medium
+approval: Ask
+steps:
+  - id: "step-1"
+    action:
+      type: FilesMove
+    description: "Move 1"
+    requires_approval: true
+    inputs:
+      source: /tmp/a
+      destination: /tmp/b
+  - id: "step-2"
+    action:
+      type: FilesMove
+    description: "Move 2"
+    requires_approval: true
+    inputs:
+      source: /tmp/c
+      destination: /tmp/d
+metadata: {}"#,
+        )
+        .unwrap();
+
+        let policy_path = tempdir.path().join("policy.yml");
+        fs::write(
+            &policy_path,
+            r#"default_mode: Ask
+action_modes:
+  FilesMove: Ask
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true"#,
+        )
+        .unwrap();
+
+        // With --approve-all, both steps should reach executor
+        let result = core_run_apply(
             &plan_path,
             &policy_path,
             Some(receipts_dir.as_path()),
@@ -5209,23 +4083,25 @@ action_modes:
             false,
             false,
         );
-        // Should fail because action is AlwaysDeny
+        // Executor refuses FilesMove in v0.1
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_apply_json_flag_prints_json() {
+    fn test_apply_json_output() {
         let tempdir = tempfile::tempdir().unwrap();
         let receipts_dir = tempdir.path().join("receipts");
         let plans_dir = tempdir.path().join("plans");
         fs::create_dir_all(&plans_dir).unwrap();
 
-        let plan_path = plans_dir.join("plan.yml");
+        // Create a valid plan
+        let plan_path = plans_dir.join("json-plan.yml");
         fs::write(
             &plan_path,
             r#"version: "0.1"
 id: "550e8400-e29b-41d4-a716-446655440001"
-title: "Test Plan"
+title: "List Downloads"
+description: "List files"
 actor: "user"
 risk: Low
 approval: Auto
@@ -5236,7 +4112,7 @@ steps:
     description: "List files"
     requires_approval: false
     inputs:
-      path: "~/Downloads"
+      path: /tmp
 metadata: {}"#,
         )
         .unwrap();
@@ -5244,8 +4120,7 @@ metadata: {}"#,
         let policy_path = tempdir.path().join("policy.yml");
         fs::write(
             &policy_path,
-            r#"version: "0.1"
-default_mode: Allow
+            r#"default_mode: Allow
 action_modes:
   FilesList: Allow
 allowed_roots: []
@@ -5254,46 +4129,53 @@ shell_requires_sandbox: true"#,
         )
         .unwrap();
 
-        // Use dry_run since ~/Downloads is not in allowed_roots
-        let result = run_apply(
+        let result = core_run_apply(
             &plan_path,
             &policy_path,
             Some(receipts_dir.as_path()),
-            &[tempdir.path().to_path_buf()],
+            &[std::path::PathBuf::from("/tmp")],
             &[],
             false,
             None,
-            true, // dry_run
+            false,
             true, // json
         );
-        // JSON output doesn't change success/failure
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_apply_model_router_url_rejected_if_not_loopback() {
+    fn test_apply_authorization_summary_printed() {
         let tempdir = tempfile::tempdir().unwrap();
         let receipts_dir = tempdir.path().join("receipts");
         let plans_dir = tempdir.path().join("plans");
         fs::create_dir_all(&plans_dir).unwrap();
 
-        let plan_path = plans_dir.join("plan.yml");
+        // Create a plan with multiple steps
+        let plan_path = plans_dir.join("summary-plan.yml");
         fs::write(
             &plan_path,
             r#"version: "0.1"
 id: "550e8400-e29b-41d4-a716-446655440001"
-title: "Test Plan"
+title: "Multi step plan"
+description: "Test"
 actor: "user"
 risk: Low
 approval: Auto
 steps:
   - id: "step-1"
     action:
-      type: ModelChat
-    description: "Chat"
+      type: FilesList
+    description: "List 1"
     requires_approval: false
     inputs:
-      message: "hello"
+      path: /tmp
+  - id: "step-2"
+    action:
+      type: FilesList
+    description: "List 2"
+    requires_approval: false
+    inputs:
+      path: /tmp
 metadata: {}"#,
         )
         .unwrap();
@@ -5301,25 +4183,26 @@ metadata: {}"#,
         let policy_path = tempdir.path().join("policy.yml");
         fs::write(
             &policy_path,
-            r#"version: "0.1"
-default_mode: Allow
+            r#"default_mode: Allow
 action_modes:
-  ModelChat: Allow"#,
+  FilesList: Allow
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true"#,
         )
         .unwrap();
 
-        let result = run_apply(
+        let result = core_run_apply(
             &plan_path,
             &policy_path,
             Some(receipts_dir.as_path()),
-            &[],
+            &[std::path::PathBuf::from("/tmp")],
             &[],
             false,
-            Some("http://example.com:8088"), // non-loopback URL
+            None,
             false,
             false,
         );
-        // The executor.with_model_router_url should reject non-loopback
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 }

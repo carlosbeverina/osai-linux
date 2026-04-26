@@ -929,6 +929,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
+ "osai-agent-core",
  "osai-plan-dsl",
  "osai-receipt-logger",
  "osai-tool-executor",
@@ -942,6 +943,24 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "osai-agent-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "osai-plan-dsl",
+ "osai-receipt-logger",
+ "osai-tool-executor",
+ "osai-toolbroker",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "url",
+ "uuid",
 ]
 
 [[package]]
