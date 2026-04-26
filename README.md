@@ -61,7 +61,15 @@ This starts:
 - **llama.cpp** on `127.0.0.1:8092` serving a GGUF model
 - **Model Router** on `127.0.0.1:8088` routing to real llama.cpp
 
-The GGUF model must already be present at `.local-models/llamacpp/qwen2.5-0.5b-instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf`. The script does not download models.
+The default GGUF model is **Gemma 4 E2B Q8 GGUF**, validated at:
+
+```
+.local-models/llamacpp/gemma-4-e2b-it/gemma-4-E2B-it-Q8_0.gguf
+```
+
+A small Qwen2.5-0.5B GGUF is kept as a smoke-test fallback for quick validation.
+
+**Model files are not committed to git** — download GGUF files separately and place them at the expected paths.
 
 Uses **llama.cpp as the laptop default** (no CUDA required for CPU build).
 
@@ -109,7 +117,7 @@ By default, Model Router uses mock mode (`OSAI_LOCAL_MOCK=true`). To use real ll
    OSAI_LOCAL_PROVIDER=llamacpp
    OSAI_LOCAL_MOCK=false
    OSAI_LLAMACPP_BASE_URL=http://127.0.0.1:8092/v1
-   OSAI_LLAMACPP_MODEL=gemma-local-gguf
+   OSAI_LLAMACPP_MODEL=gemma-4-E2B-it-Q8_0.gguf
    OSAI_LLAMACPP_API_KEY=osai-local-dev-token
    ```
 3. Restart Model Router: `systemctl --user restart osai-model-router.service`

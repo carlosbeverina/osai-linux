@@ -10,7 +10,7 @@ osai-agent CLI tool run
   → ToolExecutor ModelChat
   → Model Router (OSAI_LOCAL_PROVIDER=llamacpp, OSAI_LOCAL_MOCK=false)
   → llama.cpp llama-server (CUDA build)
-  → Qwen2.5-0.5B GGUF Q4_K_M
+  → Gemma 4 E2B GGUF Q8_0
   → receipts
 ```
 
@@ -24,15 +24,15 @@ osai-agent CLI tool run
 | CUDA Toolkit | 13.0 |
 | nvcc | V13.0.88 |
 | llama.cpp | Repo-local CUDA build from `.local-runtimes/llama.cpp` |
-| Model | Qwen2.5-0.5B-Instruct GGUF Q4_K_M |
-| Model path | `.local-models/llamacpp/qwen2.5-0.5b-instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf` |
+| Model | **Gemma 4 E2B GGUF Q8_0** (default local model) |
+| Model path | `.local-models/llamacpp/gemma-4-e2b-it/gemma-4-E2B-it-Q8_0.gguf` |
 | Ports | llama.cpp: 8092, Model Router: 8088 |
 
 ## Quick Start
 
 ```bash
 # 1. Ensure GGUF model is present at the expected path
-ls .local-models/llamacpp/qwen2.5-0.5b-instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf
+ls .local-models/llamacpp/gemma-4-e2b-it/gemma-4-E2B-it-Q8_0.gguf
 
 # 2. Build llama.cpp (if not already built)
 #    See README.md "Installing llama.cpp" section
@@ -73,11 +73,14 @@ cd ../..
 
 The GGUF model must already be downloaded. This is intentional — the scripts do not download models.
 
+**Default local model** (Gemma 4 E2B Q8 GGUF):
+
 ```bash
-# Example: Qwen2.5-0.5B-Instruct Q4_K_M GGUF
-# Download from Hugging Face and place at:
-# .local-models/llamacpp/qwen2.5-0.5b-instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf
+# Place at:
+# .local-models/llamacpp/gemma-4-e2b-it/gemma-4-E2B-it-Q8_0.gguf
 ```
+
+A small Qwen2.5-0.5B GGUF is kept as a smoke-test fallback for quick validation.
 
 ## Step-by-Step (Manual)
 
@@ -149,13 +152,14 @@ All 7 checks must pass.
 
 ## Observed Performance
 
-- Direct llama.cpp request: ~328 predicted tokens/s on Qwen2.5-0.5B GGUF Q4_K_M
-- llama.cpp CUDA build is validated, but the first test GGUF is small and not the final OSAI model
+- Direct llama.cpp request: ~328 predicted tokens/s on Qwen2.5-0.5B GGUF Q4_K_M (smoke test)
+- Gemma 4 E2B GGUF Q8_0 validated as the default local model via `osai-local-check`
+- llama.cpp CUDA build handles Gemma 4 E2B on RTX 4060 (8GB VRAM) successfully
 
 ## Next Steps
 
-1. **Test larger GGUF models** (e.g., Gemma 4 E2B/E4B GGUF)
-2. **Test Gemma GGUF** models for comparison
+1. ~~Test larger GGUF models~~ Gemma 4 E2B Q8 GGUF is now the validated default ✓
+2. **Test Gemma 4 E4B GGUF** for higher-capability local inference
 3. **Add model selection policy** for laptop profiles (battery vs. performance)
 4. **Benchmark** CPU vs GPU llama.cpp performance on RTX 4060
 5. **Validate vLLM** on desktop with dedicated GPU when available

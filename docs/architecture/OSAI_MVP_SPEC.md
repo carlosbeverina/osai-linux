@@ -336,17 +336,18 @@ UUIDs are V4 random, providing uniqueness without predictability.
 
 ### 7.1 Local Model Strategy
 
-**Default Local**: Gemma 4 E4B
-- Used for: Most agent interactions
-- Binding: Via local Model Router to Ollama (future) or direct API
+**Default Local**: Gemma 4 E2B Q8 GGUF
+- Used for: Most agent interactions, validated via llama.cpp CUDA build
+- Location: `.local-models/llamacpp/gemma-4-e2b-it/gemma-4-E2B-it-Q8_0.gguf`
 
-**Background Local**: Gemma 4 E2B
-- Used for: Lightweight background tasks
-- Characteristics: Faster, lower resource usage
+**Smoke-test Fallback**: Qwen2.5-0.5B GGUF Q4_K_M
+- Used for: Quick validation, CI, resource-constrained environments
 
 **Performance Local**: Gemma 4 26B
 - Used for: Complex reasoning tasks
 - Activation: Only when plugged in or explicitly requested
+
+**Background Local**: Gemma 4 E2B (same model, lower资源配置)
 
 ### 7.2 Cloud Model Strategy
 

@@ -82,7 +82,7 @@ OSAI_LOCAL_MOCK=true
 OSAI_LLAMACPP_BASE_URL=http://127.0.0.1:8092/v1
 
 # Default model served by llama.cpp
-OSAI_LLAMACPP_MODEL=gemma-local-gguf
+OSAI_LLAMACPP_MODEL=gemma-4-E2B-it-Q8_0.gguf
 
 # API key for llama.cpp
 OSAI_LLAMACPP_API_KEY=osai-local-dev-token
