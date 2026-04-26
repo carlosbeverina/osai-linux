@@ -1,0 +1,56 @@
+#!/bin/bash
+# OSAI llama.cpp Up - Start llama-server local runtime
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Load llama.cpp environment
+source "${SCRIPT_DIR}/osai-llamacpp-env"
+
+# Check if llama-server binary is available (repo-local or PATH)
+if [[ ! -x "$OSAI_LLAMACPP_BIN" ]] && ! command -v llama-server &> /dev/null; then
+    echo "Error: llama-server is not installed."
+    echo ""
+    echo "To build llama.cpp with CUDA support:"
+    echo "  git clone https://github.com/ggml-org/llama.cpp.git .local-runtimes/llama.cpp"
+    echo "  cd .local-runtimes/llama.cpp"
+    echo "  cmake -B build -DGGML_CUDA=ON"
+    echo "  cmake --build build -j"
+    echo ""
+    echo "Then run this script again."
+    exit 1
+fi
+
+# Check if model path exists
+if [[ ! -f "$OSAI_LLAMACPP_MODEL_PATH" ]]; then
+    echo "Error: Model file not found at ${OSAI_LLAMACPP_MODEL_PATH}"
+    echo ""
+    echo "Download a GGUF model and set OSAI_LLAMACPP_MODEL_PATH, or place it at:"
+    echo "  ${REPO_ROOT}/.local-models/llamacpp/model.gguf"
+    exit 1
+fi
+
+# Use OSAI_LLAMACPP_BIN if set and executable, otherwise fall back to llama-server from PATH
+LLAMA_CMD="${OSAI_LLAMACPP_BIN}"
+if [[ ! -x "$LLAMA_CMD" ]]; then
+    LLAMA_CMD="llama-server"
+fi
+
+echo "Starting llama-server local runtime..."
+echo "  Model: ${OSAI_LLAMACPP_MODEL_PATH}"
+echo "  Host: ${OSAI_LLAMACPP_HOST}"
+echo "  Port: ${OSAI_LLAMACPP_PORT}"
+echo "  Base URL: ${OSAI_LLAMACPP_BASE_URL}"
+echo ""
+echo "Press Ctrl+C to stop"
+echo ""
+
+exec "$LLAMA_CMD" \
+    --model "$OSAI_LLAMACPP_MODEL_PATH" \
+    --host "$OSAI_LLAMACPP_HOST" \
+    --port "$OSAI_LLAMACPP_PORT" \
+    --api-key "$OSAI_LLAMACPP_API_KEY" \
+    --ctx-size "$OSAI_LLAMACPP_CTX_SIZE" \
+    --n-gpu-layers "$OSAI_LLAMACPP_GPU_LAYERS" \
+    $OSAI_LLAMACPP_EXTRA_ARGS

@@ -317,3 +317,115 @@ class MiniMaxProvider(BaseProvider):
                 total_tokens=data["usage"]["total_tokens"]
             )
         ), normalized.reasoning_stripped
+
+
+class LlamaCppProvider(BaseProvider):
+    """llama.cpp local model provider.
+
+    Uses OpenAI-compatible API endpoint (llama-server).
+    Supports mock mode for development/testing.
+    """
+
+    # Default max_tokens when not specified by user
+    DEFAULT_MAX_TOKENS = 1024
+
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8092/v1",
+        api_key: str = "osai-local-dev-token",
+        default_model: str = "gemma-local-gguf",
+        mock_mode: bool = True
+    ):
+        """Initialize llama.cpp provider."""
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.default_model = default_model
+        self.mock_mode = mock_mode
+
+    def generate(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
+        """Generate a response via llama.cpp API.
+
+        Returns:
+            Tuple of (response, reasoning_stripped)
+        """
+        if self.mock_mode:
+            return self._mock_response(routed_model, request)
+
+        return self._real_request(request, routed_model)
+
+    def _mock_response(self, model: str, request: ChatCompletionRequest) -> tuple[ChatCompletionResponse, bool]:
+        """Return mock response for local llama.cpp testing."""
+        response = ChatCompletionResponse(
+            id=f"osai-llamacpp-{int(time.time() * 1000)}",
+            created=int(time.time()),
+            model=model,
+            choices=[
+                Choice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=f"OSAI llama.cpp local mock response (model: {model})"
+                    ),
+                    finish_reason="stop"
+                )
+            ],
+            usage=Usage(
+                prompt_tokens=len(str(request.messages)),
+                completion_tokens=10,
+                total_tokens=len(str(request.messages)) + 10
+            )
+        )
+        return response, False
+
+    def _real_request(self, request: ChatCompletionRequest, routed_model: str) -> tuple[ChatCompletionResponse, bool]:
+        """Make real request to llama.cpp API (not called in tests)."""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": routed_model,
+            "messages": [{"role": m.role, "content": m.content} for m in request.messages],
+        }
+
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
+
+        # Apply default max_tokens if not specified
+        max_tokens = request.max_tokens if request.max_tokens is not None else self.DEFAULT_MAX_TOKENS
+        payload["max_tokens"] = max_tokens
+
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        # Normalize the output to strip thinking blocks
+        normalized = strip_thinking_blocks(data["choices"][0]["message"]["content"])
+        finish_reason = data["choices"][0]["finish_reason"]
+
+        return ChatCompletionResponse(
+            id=data["id"],
+            created=data["created"],
+            model=data["model"],
+            choices=[
+                Choice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=normalized.content
+                    ),
+                    finish_reason=finish_reason
+                )
+            ],
+            usage=Usage(
+                prompt_tokens=data["usage"]["prompt_tokens"],
+                completion_tokens=data["usage"]["completion_tokens"],
+                total_tokens=data["usage"]["total_tokens"]
+            )
+        ), normalized.reasoning_stripped

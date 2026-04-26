@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 ENABLE_NOW=false
 ENABLE_VLLM=false
+ENABLE_LLAMACPP=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -18,12 +19,17 @@ while [[ $# -gt 0 ]]; do
             ENABLE_VLLM=true
             shift
             ;;
+        --enable-llamacpp)
+            ENABLE_LLAMACPP=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--enable-now] [--enable-vllm]"
+            echo "Usage: $0 [--enable-now] [--enable-vllm] [--enable-llamacpp]"
             echo ""
             echo "Options:"
-            echo "  --enable-now    Enable and start the service immediately"
-            echo "  --enable-vllm   Also enable vLLM service (only with --enable-now)"
+            echo "  --enable-now        Enable and start the service immediately"
+            echo "  --enable-vllm       Also enable vLLM service (only with --enable-now)"
+            echo "  --enable-llamacpp   Also enable llama.cpp service (only with --enable-now)"
             echo ""
             echo "This script installs systemd user units from:"
             echo "  ${REPO_ROOT}/systemd/user/"
@@ -40,6 +46,11 @@ done
 
 if [[ "$ENABLE_VLLM" == "true" ]] && [[ "$ENABLE_NOW" != "true" ]]; then
     echo "Error: --enable-vllm requires --enable-now"
+    exit 1
+fi
+
+if [[ "$ENABLE_LLAMACPP" == "true" ]] && [[ "$ENABLE_NOW" != "true" ]]; then
+    echo "Error: --enable-llamacpp requires --enable-now"
     exit 1
 fi
 
@@ -70,7 +81,8 @@ echo "=== Installation complete ==="
 echo ""
 echo "Installed services:"
 echo "  - osai-model-router.service (API gateway)"
-echo "  - osai-vllm.service (local model runtime)"
+echo "  - osai-vllm.service (vLLM local runtime, optional)"
+echo "  - osai-llamacpp.service (llama.cpp local runtime, optional)"
 echo ""
 echo "Next steps:"
 echo ""
@@ -89,13 +101,15 @@ if [[ "$ENABLE_NOW" == "true" ]]; then
         echo ""
         echo "vLLM service status:"
         systemctl --user status osai-vllm.service
-    else
+    fi
+
+    if [[ "$ENABLE_LLAMACPP" == "true" ]]; then
         echo ""
-        echo "To start osai-vllm.service manually:"
-        echo "  systemctl --user start osai-vllm.service"
+        echo "Enabling and starting osai-llamacpp.service..."
+        systemctl --user enable --now osai-llamacpp.service
         echo ""
-        echo "To enable at login:"
-        echo "  systemctl --user enable osai-vllm.service"
+        echo "llama.cpp service status:"
+        systemctl --user status osai-llamacpp.service
     fi
 else
     echo "To start osai-model-router.service manually:"
@@ -109,6 +123,11 @@ else
     echo ""
     echo "To view logs:"
     echo "  journalctl --user -u osai-model-router -f"
+    echo ""
+    echo "For llama.cpp runtime management:"
+    echo "  ./scripts/osai-llamacpp-up   # Start llama.cpp"
+    echo "  ./scripts/osai-llamacpp-check # Check health"
+    echo "  ./scripts/osai-llamacpp-down  # Stop llama.cpp service"
     echo ""
     echo "For vLLM runtime management:"
     echo "  ./scripts/osai-vllm-up   # Start vLLM"

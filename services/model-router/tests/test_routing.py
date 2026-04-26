@@ -13,7 +13,7 @@ def client():
 
 
 def test_osai_auto_local_only(client):
-    """Test osai-auto with local_only privacy routes to vLLM local."""
+    """Test osai-auto with local_only privacy routes to local provider."""
     response = client.post("/v1/chat/completions", json={
         "model": "osai-auto",
         "messages": [{"role": "user", "content": "Hello"}],
@@ -21,8 +21,8 @@ def test_osai_auto_local_only(client):
     })
     assert response.status_code == 200
     data = response.json()
-    # Should route to vLLM local mock (osai-local -> OSAI_VLLM_MODEL which defaults to gemma-local)
-    assert "vLLM" in data["choices"][0]["message"]["content"] or "gemma-local" in data["choices"][0]["message"]["content"]
+    # Should route to local mock (llamacpp by default)
+    assert "llama.cpp" in data["choices"][0]["message"]["content"] or "gemma-local-gguf" in data["choices"][0]["message"]["content"]
 
 
 def test_osai_auto_complexity_high(client):
@@ -52,31 +52,31 @@ def test_osai_auto_speed_fast(client):
 
 
 def test_osai_auto_no_metadata_routes_local(client):
-    """Test osai-auto with no metadata routes to local vLLM by default."""
+    """Test osai-auto with no metadata routes to local provider by default."""
     response = client.post("/v1/chat/completions", json={
         "model": "osai-auto",
         "messages": [{"role": "user", "content": "Hello"}]
     })
     assert response.status_code == 200
     data = response.json()
-    # Should route to vLLM local mock
-    assert "vLLM" in data["choices"][0]["message"]["content"] or "gemma-local" in data["choices"][0]["message"]["content"]
+    # Should route to local mock (llamacpp by default)
+    assert "llama.cpp" in data["choices"][0]["message"]["content"] or "gemma-local-gguf" in data["choices"][0]["message"]["content"]
 
 
-def test_osai_local_routes_vllm(client):
-    """Test osai-local routes to vLLM local provider."""
+def test_osai_local_routes_llamacpp(client):
+    """Test osai-local routes to llama.cpp local provider by default."""
     response = client.post("/v1/chat/completions", json={
         "model": "osai-local",
         "messages": [{"role": "user", "content": "Hello"}]
     })
     assert response.status_code == 200
     data = response.json()
-    # Should route to vLLM mock with osai-local or gemma-local in response
-    assert "vLLM" in data["choices"][0]["message"]["content"]
+    # Should route to llama.cpp mock
+    assert "llama.cpp" in data["choices"][0]["message"]["content"]
 
 
 def test_gemma4_e2b_routes_local(client):
-    """Test gemma4:e2b routes to vLLM local provider."""
+    """Test gemma4:e2b routes to local provider."""
     response = client.post("/v1/chat/completions", json={
         "model": "gemma4:e2b",
         "messages": [{"role": "user", "content": "Hello"}]
@@ -87,7 +87,7 @@ def test_gemma4_e2b_routes_local(client):
 
 
 def test_gemma4_e4b_routes_local(client):
-    """Test gemma4:e4b routes to vLLM local provider."""
+    """Test gemma4:e4b routes to local provider."""
     response = client.post("/v1/chat/completions", json={
         "model": "gemma4:e4b",
         "messages": [{"role": "user", "content": "Hello"}]
@@ -98,7 +98,7 @@ def test_gemma4_e4b_routes_local(client):
 
 
 def test_gemma4_26b_routes_local(client):
-    """Test gemma4:26b routes to vLLM local provider."""
+    """Test gemma4:26b routes to local provider."""
     response = client.post("/v1/chat/completions", json={
         "model": "gemma4:26b",
         "messages": [{"role": "user", "content": "Hello"}]
@@ -141,20 +141,20 @@ def test_minimax_highspeed_routes_cloud(client):
     assert "MiniMax" in data["choices"][0]["message"]["content"]
 
 
-def test_vllm_local_mock_response(client):
-    """Test that default local route returns vLLM local mock response."""
+def test_llamacpp_local_mock_response(client):
+    """Test that default local route returns llama.cpp local mock response."""
     response = client.post("/v1/chat/completions", json={
         "model": "osai-local",
         "messages": [{"role": "user", "content": "Hello"}]
     })
     assert response.status_code == 200
     data = response.json()
-    # Response should indicate vLLM mock
-    assert "vLLM" in data["choices"][0]["message"]["content"]
+    # Response should indicate llama.cpp mock
+    assert "llama.cpp" in data["choices"][0]["message"]["content"]
 
 
-def test_osai_auto_local_only_routes_vllm(client):
-    """Test osai-auto with local_only routes to vLLM local provider."""
+def test_osai_auto_local_only_routes_llamacpp(client):
+    """Test osai-auto with local_only routes to llama.cpp local provider."""
     response = client.post("/v1/chat/completions", json={
         "model": "osai-auto",
         "messages": [{"role": "user", "content": "Hello"}],
@@ -162,17 +162,17 @@ def test_osai_auto_local_only_routes_vllm(client):
     })
     assert response.status_code == 200
     data = response.json()
-    # Should be vLLM mock response
-    assert "vLLM" in data["choices"][0]["message"]["content"]
+    # Should be llama.cpp mock response
+    assert "llama.cpp" in data["choices"][0]["message"]["content"]
 
 
-def test_explicit_gemma4_e4b_routes_vllm(client):
-    """Test explicit gemma4:e4b routes to vLLM local provider."""
+def test_explicit_gemma4_e4b_routes_local(client):
+    """Test explicit gemma4:e4b routes to local provider."""
     response = client.post("/v1/chat/completions", json={
         "model": "gemma4:e4b",
         "messages": [{"role": "user", "content": "Hello"}]
     })
     assert response.status_code == 200
     data = response.json()
-    # gemma4:e4b is passed through to vLLM
+    # gemma4:e4b is passed through to local provider
     assert "gemma4:e4b" in data["choices"][0]["message"]["content"]

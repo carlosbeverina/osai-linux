@@ -120,7 +120,7 @@ def test_receipts_include_local_provider(client_with_receipts):
     assert "local_provider" in receipt
     assert "local_mock" in receipt
     assert "local_base_url_host" in receipt
-    assert receipt["local_provider"] == "vllm"
+    assert receipt["local_provider"] == "llamacpp"  # Default provider is llamacpp
     assert receipt["local_mock"] is True  # Default is mock mode
     assert receipt["local_base_url_host"] == "127.0.0.1"
 

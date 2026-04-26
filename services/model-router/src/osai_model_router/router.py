@@ -4,11 +4,11 @@ Routes model requests to appropriate providers based on model alias.
 """
 
 from .config import config
-from .providers import BaseProvider, MiniMaxProvider, VllmProvider
+from .providers import BaseProvider, LlamaCppProvider, MiniMaxProvider, VllmProvider
 from .schemas import ChatCompletionRequest, ChatCompletionResponse
 
 
-# Local model aliases (resolved to vLLM models)
+# Local model aliases
 LOCAL_MODELS = {
     "osai-local",
     "gemma4:e2b",
@@ -32,17 +32,35 @@ class ModelRouter:
 
     def __init__(self):
         """Initialize router with providers."""
-        # Validate vLLM URL at startup
-        is_valid, error = config.validate_vllm_url()
-        if not is_valid:
-            raise ValueError(f"Invalid vLLM configuration: {error}")
+        # Validate selected local provider URL
+        provider_name, base_url, _ = config.get_local_provider_config()
 
-        self.local_provider = VllmProvider(
-            base_url=config.osai_vllm_base_url,
-            api_key=config.osai_vllm_api_key,
-            default_model=config.osai_vllm_model,
-            mock_mode=config.osai_local_mock
-        )
+        if provider_name == "vllm":
+            is_valid, error = config.validate_vllm_url()
+            if not is_valid:
+                raise ValueError(f"Invalid vLLM configuration: {error}")
+        else:
+            is_valid, error = config.validate_llamacpp_url()
+            if not is_valid:
+                raise ValueError(f"Invalid llama.cpp configuration: {error}")
+
+        # Create local provider based on OSAI_LOCAL_PROVIDER
+        if config.osai_local_provider == "vllm":
+            self.local_provider = VllmProvider(
+                base_url=config.osai_vllm_base_url,
+                api_key=config.osai_vllm_api_key,
+                default_model=config.osai_vllm_model,
+                mock_mode=config.osai_local_mock
+            )
+        else:
+            # Default to llama.cpp
+            self.local_provider = LlamaCppProvider(
+                base_url=config.osai_llamacpp_base_url,
+                api_key=config.osai_llamacpp_api_key,
+                default_model=config.osai_llamacpp_model,
+                mock_mode=config.osai_local_mock
+            )
+
         self.cloud_provider = MiniMaxProvider(
             api_key=config.minimax_api_key,
             base_url=config.minimax_openai_base_url,
@@ -74,7 +92,7 @@ class ModelRouter:
         # Generate response
         response, reasoning_stripped = provider.generate(request, target_model)
 
-        # Provider name is 'VllmProvider' or 'MiniMaxProvider'
+        # Provider name is 'LlamaCppProvider', 'VllmProvider', or 'MiniMaxProvider'
         provider_name = provider.__class__.__name__
 
         return response, provider_name, target_model, reasoning_stripped
@@ -93,7 +111,7 @@ class ModelRouter:
         Returns:
             Tuple of (routed_model, provider)
         """
-        # Local models route to vLLM provider
+        # Local models route to configured local provider
         if model in LOCAL_MODELS:
             resolved_model = self._resolve_local_model(model)
             return resolved_model, self.local_provider
@@ -115,20 +133,20 @@ class ModelRouter:
         raise ValueError(f"Unknown model: {model}")
 
     def _resolve_local_model(self, model: str) -> str:
-        """Resolve local model alias to actual vLLM model.
+        """Resolve local model alias to actual local model.
 
         Args:
             model: Local model alias
 
         Returns:
-            Resolved model name for vLLM
+            Resolved model name for the local provider
         """
-        # osai-local resolves to configured vLLM model
+        # osai-local resolves to configured local model
         if model == "osai-local":
-            return config.osai_vllm_model
+            return config.get_local_model()
 
         # gemma4:* models pass through as-is
-        # (vLLM serves these with the names gemma4:e2b, gemma4:e4b, gemma4:26b)
+        # (local provider serves these with the names gemma4:e2b, gemma4:e4b, gemma4:26b)
         return model
 
     def _route_auto(self, metadata: dict) -> tuple[str, BaseProvider]:
@@ -140,7 +158,7 @@ class ModelRouter:
         Returns:
             Tuple of (routed_model, provider)
         """
-        # If local_only is specified, route to local vLLM
+        # If local_only is specified, route to configured local provider
         if metadata.get("privacy") == "local_only":
             resolved = self._resolve_local_model("osai-local")
             return resolved, self.local_provider
@@ -153,7 +171,7 @@ class ModelRouter:
         if metadata.get("speed") == "fast":
             return config.minimax_fast_model, self.cloud_provider
 
-        # Default to local vLLM
+        # Default to configured local provider
         resolved = self._resolve_local_model("osai-local")
         return resolved, self.local_provider
 

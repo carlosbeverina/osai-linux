@@ -34,12 +34,12 @@ OSAI separates model routing from agent execution for several architectural reas
 
 ### Local Models (osai-local, gemma4:*)
 
-- Processed by `VllmProvider` via vLLM OpenAI-compatible API
+- Processed by configured local provider (`LlamaCppProvider` or `VllmProvider`)
 - Zero API cost
 - Full privacy (no data leaves the machine)
 - Lower latency for simple tasks
-- **Mock mode** (default): Returns simulated responses without calling vLLM
-- **Real mode**: Calls vLLM server at `OSAI_VLLM_BASE_URL`
+- **Mock mode** (default): Returns simulated responses without calling local provider
+- **Real mode**: Calls local provider server at configured base URL
 
 ### Cloud Models (MiniMax-M2.7, MiniMax-M2.7-highspeed)
 
@@ -55,21 +55,44 @@ The `osai-auto` model uses metadata hints to route intelligently:
 
 | Metadata | Route |
 |----------|-------|
-| `privacy: "local_only"` | Local vLLM |
+| `privacy: "local_only"` | Local provider (llama.cpp or vLLM) |
 | `complexity: "high"` | Cloud (MiniMax-M2.7) |
 | `speed: "fast"` | Fast cloud (MiniMax-M2.7-highspeed) |
-| (none) | Local vLLM |
+| (none) | Local provider |
 
-## Local vLLM Configuration
+## Local Provider Configuration
 
-Configure via environment variables or `.env` file:
+OSAI supports two local providers:
+
+| Provider | Default Port | Best For |
+|----------|-------------|----------|
+| `llamacpp` | 8092 | Laptops, quantized GGUF models |
+| `vllm` | 8091 | Desktops, high throughput |
+
+### llama.cpp Configuration
 
 ```bash
-# Provider type (currently only vllm is supported)
-OSAI_LOCAL_PROVIDER=vllm
+# Provider type (llamacpp is the default for laptops)
+OSAI_LOCAL_PROVIDER=llamacpp
 
 # Mock local responses (true for testing/development)
 OSAI_LOCAL_MOCK=true
+
+# llama.cpp OpenAI-compatible base URL (must be loopback only)
+OSAI_LLAMACPP_BASE_URL=http://127.0.0.1:8092/v1
+
+# Default model served by llama.cpp
+OSAI_LLAMACPP_MODEL=gemma-local-gguf
+
+# API key for llama.cpp
+OSAI_LLAMACPP_API_KEY=osai-local-dev-token
+```
+
+### vLLM Configuration
+
+```bash
+# Provider type
+OSAI_LOCAL_PROVIDER=vllm
 
 # vLLM OpenAI-compatible base URL (must be loopback only)
 OSAI_VLLM_BASE_URL=http://127.0.0.1:8091/v1
@@ -81,7 +104,38 @@ OSAI_VLLM_MODEL=gemma-local
 OSAI_VLLM_API_KEY=osai-local-dev-token
 ```
 
-**Security**: vLLM base URL must be loopback-only (localhost or 127.0.0.1). External URLs are rejected.
+**Security**: All local provider base URLs must be loopback-only (localhost or 127.0.0.1). External URLs are rejected.
+
+## Running llama.cpp Server
+
+OSAI uses repo-local llama.cpp installation by default. To install llama.cpp:
+
+```bash
+# Clone llama.cpp
+git clone https://github.com/ggml-org/llama.cpp.git .local-runtimes/llama.cpp
+
+# Build with CUDA support
+cd .local-runtimes/llama.cpp
+cmake -B build -DGGML_CUDA=ON
+cmake --build build -j
+```
+
+Start llama.cpp using the convenience script:
+
+```bash
+./scripts/osai-llamacpp-up
+```
+
+Or manually:
+
+```bash
+# Using repo-local llama-server
+.local-runtimes/llama.cpp/build/bin/llama-server \
+    --model <path-to-gguf-model> \
+    --host 127.0.0.1 \
+    --port 8092 \
+    --api-key osai-local-dev-token
+```
 
 ## Running vLLM Server
 
@@ -114,26 +168,57 @@ Or manually:
 Then disable mock mode:
 
 ```bash
-OSAI_LOCAL_MOCK=false python -m osai_model_router.main
+OSAI_LOCAL_PROVIDER=llamacpp OSAI_LOCAL_MOCK=false python -m osai_model_router.main
 ```
 
-## Using Real vLLM Instead of Mock Mode
+## Using Real Local Provider Instead of Mock Mode
 
-To use real vLLM instead of mock local responses:
+To use a real local provider (llama.cpp or vLLM) instead of mock responses:
+
+### For llama.cpp (default for laptops)
 
 ```bash
+# Select provider
+export OSAI_LOCAL_PROVIDER=llamacpp
+
+# Disable mock mode
+export OSAI_LOCAL_MOCK=false
+
+# Configure llama.cpp connection
+export OSAI_LLAMACPP_BASE_URL=http://127.0.0.1:8092/v1
+export OSAI_LLAMACPP_MODEL=<your-gguf-model>
+export OSAI_LLAMACPP_API_KEY=osai-local-dev-token
+```
+
+Or via `~/.config/osai/model-router.env`:
+
+```
+OSAI_LOCAL_PROVIDER=llamacpp
+OSAI_LOCAL_MOCK=false
+OSAI_LLAMACPP_BASE_URL=http://127.0.0.1:8092/v1
+OSAI_LLAMACPP_MODEL=gemma-local-gguf
+OSAI_LLAMACPP_API_KEY=osai-local-dev-token
+```
+
+### For vLLM (performance backend)
+
+```bash
+# Select provider
+export OSAI_LOCAL_PROVIDER=vllm
+
 # Disable mock mode
 export OSAI_LOCAL_MOCK=false
 
 # Configure vLLM connection
 export OSAI_VLLM_BASE_URL=http://127.0.0.1:8091/v1
-export OSAI_VLLM_MODEL=<your-local-model>
+export OSAI_VLLM_MODEL=<your-model>
 export OSAI_VLLM_API_KEY=osai-local-dev-token
 ```
 
 Or via `~/.config/osai/model-router.env`:
 
 ```
+OSAI_LOCAL_PROVIDER=vllm
 OSAI_LOCAL_MOCK=false
 OSAI_VLLM_BASE_URL=http://127.0.0.1:8091/v1
 OSAI_VLLM_MODEL=gemma-local
@@ -142,7 +227,7 @@ OSAI_VLLM_API_KEY=osai-local-dev-token
 
 Then restart the Model Router service or restart your development server.
 
-**Note**: No model is downloaded by these scripts. You must install vLLM and download models separately.
+**Note**: No model is downloaded by these scripts. You must install the runtime and download models separately.
 
 ## MiniMax Configuration
 
@@ -162,7 +247,7 @@ MINIMAX_FAST_MODEL=MiniMax-M2.7-highspeed
 For testing and development without API calls:
 
 ```bash
-# Mock local vLLM responses (default: true)
+# Mock local responses (llama.cpp or vLLM, default: true)
 OSAI_LOCAL_MOCK=true
 
 # Mock cloud MiniMax responses (default: true)
@@ -181,7 +266,7 @@ Every chat completion request writes a JSON receipt to:
 Receipts include:
 
 - Request ID, timestamp, service name
-- Selected provider (`VllmProvider` or `MiniMaxProvider`)
+- Selected provider (`LlamaCppProvider`, `VllmProvider`, or `MiniMaxProvider`)
 - Requested model and routed model
 - Privacy, complexity, speed metadata hints
 - Status (executed/failed)
@@ -199,10 +284,10 @@ Receipts **never** contain:
 
 | Field | Description |
 |-------|-------------|
-| `selected_provider` | `VllmProvider` or `MiniMaxProvider` |
-| `local_provider` | `vllm` (for VllmProvider routes) |
-| `local_mock` | `true` if local vLLM is mocked |
-| `local_base_url_host` | Host of vLLM URL (e.g., `127.0.0.1`) |
+| `selected_provider` | `LlamaCppProvider`, `VllmProvider`, or `MiniMaxProvider` |
+| `local_provider` | `llamacpp` or `vllm` (for local routes) |
+| `local_mock` | `true` if local provider is mocked |
+| `local_base_url_host` | Host of local provider URL (e.g., `127.0.0.1`) |
 | `routed_model` | Actual model used (may differ from requested) |
 | `input_summary` | Message count and roles only |
 

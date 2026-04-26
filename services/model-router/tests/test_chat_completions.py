@@ -20,11 +20,11 @@ def test_chat_completions_local_model(client):
     })
     assert response.status_code == 200
     data = response.json()
-    # osai-local is resolved to gemma-local (the configured vLLM model)
-    assert data["model"] == "gemma-local"
+    # osai-local is resolved to the configured local model (llamacpp default)
+    assert data["model"] == "gemma-local-gguf"
     assert "choices" in data
     assert len(data["choices"]) == 1
-    assert "OSAI vLLM local mock response" in data["choices"][0]["message"]["content"]
+    assert "OSAI llama.cpp local mock response" in data["choices"][0]["message"]["content"]
 
 
 def test_chat_completions_gemma4_e2b(client):
@@ -36,7 +36,7 @@ def test_chat_completions_gemma4_e2b(client):
     assert response.status_code == 200
     data = response.json()
     assert data["model"] == "gemma4:e2b"
-    assert "OSAI vLLM local mock response" in data["choices"][0]["message"]["content"]
+    assert "OSAI llama.cpp local mock response" in data["choices"][0]["message"]["content"]
 
 
 def test_chat_completions_cloud_model_mock(client):

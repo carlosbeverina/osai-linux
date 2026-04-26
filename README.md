@@ -31,13 +31,71 @@ Current crates:
 - `osai-receipt-logger`
 - `osai-agent-cli`
 
-## vLLM Local Runtime
+## Local Model Runtimes
 
-OSAI uses **vLLM** as the primary local model runtime (not Ollama). vLLM provides OpenAI-compatible API for seamless routing.
+OSAI supports two local model runtimes:
+
+| Runtime | Best For | Port | Model Format |
+|---------|----------|------|--------------|
+| **llama.cpp** | Laptops, resource-constrained | 8092 | GGUF quantized |
+| **vLLM** | Desktops, high throughput | 8091 | FP16/FP8 |
+
+The default provider is **llama.cpp** (set via `OSAI_LOCAL_PROVIDER=llamacpp`).
+
+## llama.cpp Local Runtime (Laptop Default)
+
+OSAI uses **llama.cpp** as the default local runtime for laptops and resource-constrained environments. It provides excellent CPU/GPU support with quantized GGUF models.
+
+### Installing llama.cpp
+
+```bash
+# Clone llama.cpp
+git clone https://github.com/ggml-org/llama.cpp.git .local-runtimes/llama.cpp
+
+# Build with CUDA support
+cd .local-runtimes/llama.cpp
+cmake -B build -DGGML_CUDA=ON
+cmake --build build -j
+```
+
+### llama.cpp Scripts
+
+```bash
+# Load llama.cpp environment variables
+source ./scripts/osai-llamacpp-env
+
+# Start llama-server in foreground (requires llama-server built)
+./scripts/osai-llamacpp-up
+
+# Check if llama-server is running and responsive
+./scripts/osai-llamacpp-check
+
+# Stop osai-llamacpp systemd service (if active)
+./scripts/osai-llamacpp-down
+```
+
+### Using Real llama.cpp with Model Router
+
+By default, Model Router uses mock mode (`OSAI_LOCAL_MOCK=true`). To use real llama.cpp:
+
+1. Start llama.cpp: `./scripts/osai-llamacpp-up`
+2. Create `~/.config/osai/model-router.env`:
+   ```
+   OSAI_LOCAL_PROVIDER=llamacpp
+   OSAI_LOCAL_MOCK=false
+   OSAI_LLAMACPP_BASE_URL=http://127.0.0.1:8092/v1
+   OSAI_LLAMACPP_MODEL=gemma-local-gguf
+   OSAI_LLAMACPP_API_KEY=osai-local-dev-token
+   ```
+3. Restart Model Router: `systemctl --user restart osai-model-router.service`
+
+**Note**: llama.cpp must be built manually. These scripts do not build llama.cpp or download models.
+
+## vLLM Local Runtime (Performance Backend)
+
+vLLM provides excellent throughput for GPU-accelerated inference on desktops with dedicated GPUs. Use when llama.cpp is insufficient.
 
 ### Installing vLLM
-
-OSAI prefers a repo-local vLLM installation:
 
 ```bash
 mkdir -p .local-runtimes/vllm
@@ -46,8 +104,6 @@ source .local-runtimes/vllm/.venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install vllm
 ```
-
-This installs vLLM into `.local-runtimes/vllm/.venv/bin/vllm`. The scripts will automatically use this path.
 
 ### vLLM Scripts
 
@@ -65,41 +121,12 @@ source ./scripts/osai-vllm-env
 ./scripts/osai-vllm-down
 ```
 
-### End-to-End Validation
-
-After starting vLLM and Model Router, run the E2E validation:
-
-```bash
-# Assumes vLLM is running at http://127.0.0.1:8091
-# Assumes Model Router is running at http://127.0.0.1:8088
-./scripts/osai-e2e-vllm-check
-```
-
-For full validation instructions, see [docs/testing/VLLM_E2E_VALIDATION.md](docs/testing/VLLM_E2E_VALIDATION.md).
-
-### Systemd User Service
-
-```bash
-# Install systemd user units (includes both model-router and vllm)
-./scripts/osai-install-user-services
-
-# Enable and start model-router at login
-systemctl --user enable --now osai-model-router.service
-
-# Check vLLM service status
-systemctl --user status osai-vllm.service
-
-# View vLLM logs
-journalctl --user -u osai-vllm -f
-```
-
 ### Using Real vLLM with Model Router
-
-By default, Model Router uses mock mode (`OSAI_LOCAL_MOCK=true`). To use real vLLM:
 
 1. Start vLLM: `./scripts/osai-vllm-up`
 2. Create `~/.config/osai/model-router.env`:
    ```
+   OSAI_LOCAL_PROVIDER=vllm
    OSAI_LOCAL_MOCK=false
    OSAI_VLLM_BASE_URL=http://127.0.0.1:8091/v1
    OSAI_VLLM_MODEL=gemma-local
@@ -107,7 +134,32 @@ By default, Model Router uses mock mode (`OSAI_LOCAL_MOCK=true`). To use real vL
    ```
 3. Restart Model Router: `systemctl --user restart osai-model-router.service`
 
-**Note**: vLLM must be installed manually. These scripts do not install vLLM or download models.
+### Systemd User Service
+
+```bash
+# Install systemd user units (includes model-router, llama.cpp, and vllm services)
+./scripts/osai-install-user-services
+
+# Enable and start model-router at login
+systemctl --user enable --now osai-model-router.service
+
+# Check llama.cpp service status
+systemctl --user status osai-llamacpp.service
+
+# View llama.cpp logs
+journalctl --user -u osai-llamacpp -f
+```
+
+### End-to-End Validation
+
+After starting a local runtime and Model Router, run the E2E validation:
+
+```bash
+# For llama.cpp (default)
+./scripts/osai-e2e-vllm-check
+```
+
+For full validation instructions, see [docs/testing/VLLM_E2E_VALIDATION.md](docs/testing/VLLM_E2E_VALIDATION.md).
 
 ## Model Router Development
 

@@ -1,0 +1,47 @@
+#!/bin/bash
+# OSAI llama.cpp Environment
+# Source this script to set up llama.cpp runtime environment variables.
+# Usage: source scripts/osai-llamacpp-env
+
+set -euo pipefail
+
+# Resolve repo root (one level up from scripts/)
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Load root .env if present (but never print secrets)
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+    while IFS='=' read -r key value; do
+        # Only load OSAI_LLAMACPP_* variables, skip secrets
+        if [[ "$key" =~ ^OSAI_LLAMACPP_ ]]; then
+            export "$key=$value"
+        fi
+    done < "${REPO_ROOT}/.env"
+fi
+
+# Repo-local llama.cpp binary path
+LOCAL_LLAMACPP_BIN="${REPO_ROOT}/.local-runtimes/llama.cpp/build/bin/llama-server"
+LOCAL_LLAMACPP_PYTHON="${REPO_ROOT}/.local-runtimes/llama.cpp/build/bin/python"
+
+# Prefer repo-local llama-server if available and executable, otherwise fall back to PATH
+if [[ -x "$LOCAL_LLAMACPP_BIN" ]]; then
+    export OSAI_LLAMACPP_BIN="$LOCAL_LLAMACPP_BIN"
+else
+    export OSAI_LLAMACPP_BIN="llama-server"
+fi
+
+# Also export Python from repo-local build if available
+if [[ -x "$LOCAL_LLAMACPP_PYTHON" ]]; then
+    export OSAI_LLAMACPP_PYTHON="$LOCAL_LLAMACPP_PYTHON"
+else
+    export OSAI_LLAMACPP_PYTHON="python3"
+fi
+
+# Safe defaults for llama.cpp runtime
+export OSAI_LLAMACPP_HOST="${OSAI_LLAMACPP_HOST:-127.0.0.1}"
+export OSAI_LLAMACPP_PORT="${OSAI_LLAMACPP_PORT:-8092}"
+export OSAI_LLAMACPP_BASE_URL="${OSAI_LLAMACPP_BASE_URL:-http://${OSAI_LLAMACPP_HOST}:${OSAI_LLAMACPP_PORT}/v1}"
+export OSAI_LLAMACPP_API_KEY="${OSAI_LLAMACPP_API_KEY:-osai-local-dev-token}"
+export OSAI_LLAMACPP_MODEL_PATH="${OSAI_LLAMACPP_MODEL_PATH:-${REPO_ROOT}/.local-models/llamacpp/model.gguf}"
+export OSAI_LLAMACPP_CTX_SIZE="${OSAI_LLAMACPP_CTX_SIZE:-4096}"
+export OSAI_LLAMACPP_GPU_LAYERS="${OSAI_LLAMACPP_GPU_LAYERS:-999}"
+export OSAI_LLAMACPP_EXTRA_ARGS="${OSAI_LLAMACPP_EXTRA_ARGS:-}"

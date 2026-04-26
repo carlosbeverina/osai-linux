@@ -73,15 +73,15 @@ class TestMockIsolation:
         data = response.json()
         assert "MiniMax" in data["choices"][0]["message"]["content"]
 
-    def test_local_mock_returns_vllm_response(self, client):
-        """Local mock returns vLLM mock response."""
+    def test_local_mock_returns_llamacpp_response(self, client):
+        """Local mock returns llama.cpp mock response."""
         response = client.post("/v1/chat/completions", json={
             "model": "osai-local",
             "messages": [{"role": "user", "content": "Hello"}]
         })
         assert response.status_code == 200
         data = response.json()
-        assert "vLLM" in data["choices"][0]["message"]["content"]
+        assert "llama.cpp" in data["choices"][0]["message"]["content"]
 
     def test_osai_auto_no_metadata_routes_local(self, client):
         """osai-auto with no metadata routes to local mock."""

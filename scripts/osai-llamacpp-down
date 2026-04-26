@@ -1,0 +1,26 @@
+#!/bin/bash
+# OSAI llama.cpp Down - Stop osai-llamacpp systemd user service
+set -euo pipefail
+
+echo "=== OSAI llama.cpp Service Stop ==="
+echo ""
+
+# Check if systemd user is available
+if ! command -v systemctl &> /dev/null; then
+    echo "systemctl not found - cannot stop systemd service"
+    exit 1
+fi
+
+# Check if osai-llamacpp.service is active
+if systemctl --user is-active --quiet osai-llamacpp.service 2>/dev/null; then
+    echo "Stopping osai-llamacpp.service..."
+    systemctl --user stop osai-llamacpp.service
+    echo "Service stopped."
+else
+    echo "osai-llamacpp.service is not active."
+    echo ""
+    echo "Note: If you started llama-server manually (e.g., via osai-llamacpp-up in foreground),"
+    echo "stop it with Ctrl+C."
+fi
+
+exit 0

@@ -39,12 +39,15 @@ class ReceiptWriter:
         Returns:
             Dict with local_provider, local_mock, and local_base_url_host
         """
-        # Extract just the host from the vLLM base URL
-        parsed = urlparse(config.osai_vllm_base_url)
+        # Get the base URL based on selected local provider
+        provider_name, base_url, _ = config.get_local_provider_config()
+
+        # Extract just the host from the base URL
+        parsed = urlparse(base_url)
         host_only = parsed.hostname or "unknown"
 
         return {
-            "local_provider": config.osai_local_provider,
+            "local_provider": provider_name,
             "local_mock": config.osai_local_mock,
             "local_base_url_host": host_only
         }
@@ -66,7 +69,7 @@ class ReceiptWriter:
 
         Args:
             request_id: Unique request identifier
-            selected_provider: Provider that handled the request (VllmProvider or MiniMaxProvider)
+            selected_provider: Provider that handled the request (LlamaCppProvider, VllmProvider, or MiniMaxProvider)
             requested_model: Model requested by client
             routed_model: Model actually used for routing
             messages: List of message dicts (roles only, content summarized)

@@ -1,4 +1,4 @@
-"""Tests for vLLM local provider configuration."""
+"""Tests for local provider configuration (llama.cpp and vLLM)."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,14 +52,33 @@ def test_vllm_url_validation_valid():
     assert error == ""
 
 
-def test_vllm_provider_mock_mode_by_default():
+def test_llamacpp_url_validation_valid():
+    """Test llama.cpp URL validation with valid loopback URL."""
+    is_valid, error = config.validate_llamacpp_url()
+    # Default URL is http://127.0.0.1:8092/v1 which is valid
+    assert is_valid is True
+    assert error == ""
+
+
+def test_llamacpp_external_url_rejected():
+    """Test that external URLs are rejected by validate_llamacpp_url."""
+    # Temporarily set an external URL
+    original = config.osai_llamacpp_base_url
+    config.osai_llamacpp_base_url = "http://example.com:8092/v1"
+    is_valid, error = config.validate_llamacpp_url()
+    config.osai_llamacpp_base_url = original
+    assert is_valid is False
+    assert "loopback" in error.lower()
+
+
+def test_local_mock_enabled_by_default():
     """Test that OSAI_LOCAL_MOCK is True by default."""
     assert config.osai_local_mock is True
 
 
-def test_vllm_provider_type_is_vllm():
-    """Test that OSAI_LOCAL_PROVIDER is vllm by default."""
-    assert config.osai_local_provider == "vllm"
+def test_local_provider_default_is_llamacpp():
+    """Test that OSAI_LOCAL_PROVIDER is llamacpp by default."""
+    assert config.osai_local_provider == "llamacpp"
 
 
 def test_vllm_default_base_url():
@@ -67,9 +86,19 @@ def test_vllm_default_base_url():
     assert config.osai_vllm_base_url == "http://127.0.0.1:8091/v1"
 
 
+def test_llamacpp_default_base_url():
+    """Test that default llama.cpp base URL is loopback."""
+    assert config.osai_llamacpp_base_url == "http://127.0.0.1:8092/v1"
+
+
 def test_vllm_default_model():
     """Test that default vLLM model is set."""
     assert config.osai_vllm_model == "gemma-local"
+
+
+def test_llamacpp_default_model():
+    """Test that default llama.cpp model is set."""
+    assert config.osai_llamacpp_model == "gemma-local-gguf"
 
 
 def test_vllm_default_api_key():
@@ -78,3 +107,47 @@ def test_vllm_default_api_key():
     # In test environment, API key is overridden by conftest
     # This test verifies the config reads from environment variable
     assert config.osai_vllm_api_key == os.getenv("OSAI_VLLM_API_KEY", "osai-local-dev-token")
+
+
+def test_llamacpp_default_api_key():
+    """Test that llama.cpp API key can be configured via environment."""
+    import os
+    # In test environment, API key is overridden by conftest
+    # This test verifies the config reads from environment variable
+    assert config.osai_llamacpp_api_key == os.getenv("OSAI_LLAMACPP_API_KEY", "osai-local-dev-token")
+
+
+def test_get_local_provider_config_llamacpp(monkeypatch):
+    """Test that get_local_provider_config returns llamacpp when configured."""
+    monkeypatch.setattr(config, "osai_local_provider", "llamacpp")
+    monkeypatch.setattr(config, "osai_llamacpp_base_url", "http://127.0.0.1:8092/v1")
+    monkeypatch.setattr(config, "osai_llamacpp_api_key", "test-key")
+    provider_name, base_url, api_key = config.get_local_provider_config()
+    assert provider_name == "llamacpp"
+    assert base_url == "http://127.0.0.1:8092/v1"
+    assert api_key == "test-key"
+
+
+def test_get_local_provider_config_vllm(monkeypatch):
+    """Test that get_local_provider_config returns vllm when configured."""
+    monkeypatch.setattr(config, "osai_local_provider", "vllm")
+    monkeypatch.setattr(config, "osai_vllm_base_url", "http://127.0.0.1:8091/v1")
+    monkeypatch.setattr(config, "osai_vllm_api_key", "test-key")
+    provider_name, base_url, api_key = config.get_local_provider_config()
+    assert provider_name == "vllm"
+    assert base_url == "http://127.0.0.1:8091/v1"
+    assert api_key == "test-key"
+
+
+def test_get_local_model_llamacpp(monkeypatch):
+    """Test that get_local_model returns llama.cpp model when configured."""
+    monkeypatch.setattr(config, "osai_local_provider", "llamacpp")
+    monkeypatch.setattr(config, "osai_llamacpp_model", "my-gguf-model")
+    assert config.get_local_model() == "my-gguf-model"
+
+
+def test_get_local_model_vllm(monkeypatch):
+    """Test that get_local_model returns vllm model when configured."""
+    monkeypatch.setattr(config, "osai_local_provider", "vllm")
+    monkeypatch.setattr(config, "osai_vllm_model", "my-vllm-model")
+    assert config.get_local_model() == "my-vllm-model"

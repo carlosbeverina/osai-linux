@@ -1,0 +1,21 @@
+[Unit]
+Description=OSAI llama.cpp Local Runtime
+After=network.target
+
+[Service]
+EnvironmentFile=%h/.config/osai/llamacpp.env
+Environment="OSAI_LLAMACPP_BIN=%h/Projects/osai-linux/.local-runtimes/llama.cpp/build/bin/llama-server"
+Environment="OSAI_LLAMACPP_HOST=127.0.0.1"
+Environment="OSAI_LLAMACPP_PORT=8092"
+Environment="OSAI_LLAMACPP_MODEL=gemma-local-gguf"
+Environment="OSAI_LLAMACPP_MODEL_PATH=%h/Projects/osai-linux/.local-models/llamacpp/model.gguf"
+Environment="OSAI_LLAMACPP_CTX_SIZE=4096"
+Environment="OSAI_LLAMACPP_GPU_LAYERS=999"
+Environment="OSAI_LLAMACPP_API_KEY=osai-local-dev-token"
+Environment="OSAI_LLAMACPP_EXTRA_ARGS="
+ExecStart=/usr/bin/env bash -lc 'if [[ -x "$OSAI_LLAMACPP_BIN" ]]; then llama_cmd="$OSAI_LLAMACPP_BIN"; else llama_cmd="llama-server"; fi; $llama_cmd --model "$OSAI_LLAMACPP_MODEL_PATH" --host "$OSAI_LLAMACPP_HOST" --port "$OSAI_LLAMACPP_PORT" --api-key "$OSAI_LLAMACPP_API_KEY" --ctx-size "$OSAI_LLAMACPP_CTX_SIZE" --n-gpu-layers "$OSAI_LLAMACPP_GPU_LAYERS" $OSAI_LLAMACPP_EXTRA_ARGS'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
