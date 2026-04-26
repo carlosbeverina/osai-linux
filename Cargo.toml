@@ -6,7 +6,8 @@ members = [
   "crates/osai-receipt-logger",
   "crates/osai-agent-core",
   "crates/osai-agent-cli",
-  "crates/osai-tool-executor"
+  "crates/osai-tool-executor",
+  "crates/osai-api"
 ]
 
 [workspace.package]
