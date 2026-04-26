@@ -8,19 +8,25 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Load vLLM environment
 source "${SCRIPT_DIR}/osai-vllm-env"
 
-# Check if vllm command is available
-if ! command -v vllm &> /dev/null; then
-    echo "Error: vllm command not found"
+# Check if vLLM binary is available (repo-local or PATH)
+if [[ ! -x "$OSAI_VLLM_BIN" ]] && ! command -v vllm &> /dev/null; then
+    echo "Error: vLLM is not installed."
     echo ""
-    echo "Create a vLLM environment and install vLLM before running this script."
+    echo "To install vLLM in the repo-local runtime directory:"
+    echo "  mkdir -p .local-runtimes/vllm"
+    echo "  python3 -m venv .local-runtimes/vllm/.venv"
+    echo "  source .local-runtimes/vllm/.venv/bin/activate"
+    echo "  python -m pip install --upgrade pip setuptools wheel"
+    echo "  python -m pip install vllm"
     echo ""
-    echo "To create a vLLM environment:"
-    echo "  python3 -m venv ~/.venv/osai-vllm"
-    echo "  source ~/.venv/osai-vllm/bin/activate"
-    echo "  pip install vllm"
-    echo ""
-    echo "Then activate the environment and run this script again."
+    echo "Then run this script again."
     exit 1
+fi
+
+# Use OSAI_VLLM_BIN if set and executable, otherwise fall back to vllm from PATH
+VLLM_CMD="${OSAI_VLLM_BIN}"
+if [[ ! -x "$VLLM_CMD" ]]; then
+    VLLM_CMD="vllm"
 fi
 
 echo "Starting vLLM local runtime..."
@@ -32,7 +38,7 @@ echo ""
 echo "Press Ctrl+C to stop"
 echo ""
 
-exec vllm serve "$OSAI_VLLM_MODEL" \
+exec "$VLLM_CMD" serve "$OSAI_VLLM_MODEL" \
     --host "$OSAI_VLLM_HOST" \
     --port "$OSAI_VLLM_PORT" \
     --api-key "$OSAI_VLLM_API_KEY" \

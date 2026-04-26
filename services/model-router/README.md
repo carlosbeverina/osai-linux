@@ -85,17 +85,27 @@ OSAI_VLLM_API_KEY=osai-local-dev-token
 
 ## Running vLLM Server
 
-When ready to use real local models:
+OSAI uses repo-local vLLM installation by default. To install vLLM:
 
 ```bash
-# Start vLLM serving a model
-vllm serve <model_name> \
-    --host 127.0.0.1 \
-    --port 8091 \
-    --api-key osai-local-dev-token
+mkdir -p .local-runtimes/vllm
+python3 -m venv .local-runtimes/vllm/.venv
+source .local-runtimes/vllm/.venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install vllm
+```
 
-# Example with Gemma
-vllm serve gemma-4-e4b \
+Start vLLM using the convenience script:
+
+```bash
+./scripts/osai-vllm-up
+```
+
+Or manually:
+
+```bash
+# Using repo-local vLLM
+.local-runtimes/vllm/.venv/bin/vllm serve <model_name> \
     --host 127.0.0.1 \
     --port 8091 \
     --api-key osai-local-dev-token

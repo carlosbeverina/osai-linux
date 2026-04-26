@@ -18,6 +18,24 @@ if [[ -f "${REPO_ROOT}/.env" ]]; then
     done < "${REPO_ROOT}/.env"
 fi
 
+# Repo-local vLLM installation path
+LOCAL_VLLM_BIN="${REPO_ROOT}/.local-runtimes/vllm/.venv/bin/vllm"
+LOCAL_VLLM_PYTHON="${REPO_ROOT}/.local-runtimes/vllm/.venv/bin/python"
+
+# Prefer repo-local vLLM if available and executable, otherwise fall back to PATH
+if [[ -x "$LOCAL_VLLM_BIN" ]]; then
+    export OSAI_VLLM_BIN="$LOCAL_VLLM_BIN"
+else
+    export OSAI_VLLM_BIN="vllm"
+fi
+
+# Also export Python from repo-local venv if available
+if [[ -x "$LOCAL_VLLM_PYTHON" ]]; then
+    export OSAI_VLLM_PYTHON="$LOCAL_VLLM_PYTHON"
+else
+    export OSAI_VLLM_PYTHON="python3"
+fi
+
 # Safe defaults for vLLM runtime
 export OSAI_VLLM_HOST="${OSAI_VLLM_HOST:-127.0.0.1}"
 export OSAI_VLLM_PORT="${OSAI_VLLM_PORT:-8091}"

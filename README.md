@@ -35,6 +35,20 @@ Current crates:
 
 OSAI uses **vLLM** as the primary local model runtime (not Ollama). vLLM provides OpenAI-compatible API for seamless routing.
 
+### Installing vLLM
+
+OSAI prefers a repo-local vLLM installation:
+
+```bash
+mkdir -p .local-runtimes/vllm
+python3 -m venv .local-runtimes/vllm/.venv
+source .local-runtimes/vllm/.venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install vllm
+```
+
+This installs vLLM into `.local-runtimes/vllm/.venv/bin/vllm`. The scripts will automatically use this path.
+
 ### vLLM Scripts
 
 ```bash

@@ -23,6 +23,11 @@ secrets.*
 .models/
 .ollama/
 
+# Local runtimes (vLLM, etc.)
+.local-runtimes/
+models/
+.local-models/
+
 # Claude Code local settings
 .claude/settings.local.json
 .claude/
