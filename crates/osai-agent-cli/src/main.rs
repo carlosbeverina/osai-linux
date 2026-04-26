@@ -91,8 +91,8 @@ enum Commands {
         /// Print full JSON response.
         #[arg(long)]
         json: bool,
-        /// Positional message words (joined with spaces).
-        #[arg(last = true)]
+        /// Positional message (one or more words, joined with spaces).
+        #[arg(last = false)]
         positional_message: Vec<String>,
     },
 }
