@@ -51,3 +51,6 @@ services/model-router/.venv/
 **/__pycache__/
 **/.pytest_cache/
 *.pyc
+
+# OSAI generated local artifacts
+generated/

@@ -1,5 +1,5 @@
 #!/bin/bash
-# OSAI Local Runtime Check - Verify both services and E2E path are working
+# OSAI Local Runtime Check - Verify all services and E2E path are working
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,9 +43,34 @@ else
     fail "Model Router /health returned HTTP $HTTP_CODE (expected 200)"
 fi
 
-# Check 3: Model Router returns non-mock response for local_only
+# Check 3: osai-api /health
 echo ""
-echo "Check 3: POST /v1/chat/completions (osai-auto local_only, non-mock)"
+echo "Check 3: osai-api /health"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    --max-time 10 \
+    "${OSAI_API_URL}/health" 2>&1) || true
+
+if [[ "$HTTP_CODE" == "200" ]]; then
+    ok "osai-api /health returned HTTP $HTTP_CODE"
+else
+    fail "osai-api /health returned HTTP $HTTP_CODE (expected 200)"
+fi
+
+# Check 4: osai-api /v1/capabilities
+echo ""
+echo "Check 4: osai-api /v1/capabilities"
+CAPABILITIES=$(curl -s --max-time 10 \
+    "${OSAI_API_URL}/v1/capabilities" 2>&1) || true
+
+if echo "$CAPABILITIES" | grep -q '"chat":true'; then
+    ok "osai-api capabilities include chat"
+else
+    fail "osai-api /v1/capabilities failed or missing chat: $CAPABILITIES"
+fi
+
+# Check 5: Model Router returns non-mock response for local_only
+echo ""
+echo "Check 5: POST /v1/chat/completions (osai-auto local_only, non-mock)"
 
 RESPONSE=$(curl -s --max-time 60 \
     -H "Content-Type: application/json" \
@@ -63,9 +88,30 @@ else
     fail "Model Router chat/completions failed: $RESPONSE"
 fi
 
-# Check 4: osai-agent CLI tool run through Model Router
+# Check 6: osai-api /v1/chat smoke test
 echo ""
-echo "Check 4: osai-agent-cli tool run examples/plans/model-chat.yml"
+echo "Check 6: osai-api /v1/chat smoke test"
+
+HTTP_CODE=$(curl -s -o /tmp/osai-chat-body.txt -w "%{http_code}" --max-time 120 \
+    -X POST "${OSAI_API_URL}/v1/chat" \
+    -H "Content-Type: application/json" \
+    -d '{"message":"Reply with exactly: OSAI API local stack OK"}' 2>&1) || true
+
+CHAT_RESPONSE=$(cat /tmp/osai-chat-body.txt 2>/dev/null || echo "")
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+    fail "osai-api /v1/chat returned HTTP $HTTP_CODE (expected 200): $CHAT_RESPONSE"
+elif echo "$CHAT_RESPONSE" | grep -q "OSAI API local stack OK"; then
+    ok "osai-api /v1/chat smoke test passed"
+elif echo "$CHAT_RESPONSE" | grep -q '"status":"error"'; then
+    fail "osai-api /v1/chat returned error: $CHAT_RESPONSE"
+else
+    fail "osai-api /v1/chat returned unexpected response (HTTP $HTTP_CODE): $CHAT_RESPONSE"
+fi
+
+# Check 7: osai-agent CLI tool run through Model Router
+echo ""
+echo "Check 7: osai-agent-cli tool run examples/plans/model-chat.yml"
 
 PLAN_FILE="${REPO_ROOT}/examples/plans/model-chat.yml"
 POLICY_FILE="${REPO_ROOT}/examples/policies/default-secure.yml"
@@ -94,27 +140,27 @@ else
     fail "osai-agent-cli tool run did not produce expected output"
 fi
 
-# Check 5: Tool receipts exist
+# Check 8: Tool receipts exist
 echo ""
-echo "Check 5: Tool receipts exist"
+echo "Check 8: Tool receipts exist"
 if ls "$TOOL_RECEIPTS_DIR"/*.json 2>/dev/null | head -1 | grep -q ".json"; then
     ok "Tool receipts found in $TOOL_RECEIPTS_DIR"
 else
     fail "No tool receipts found in $TOOL_RECEIPTS_DIR"
 fi
 
-# Check 6: Model Router receipts exist
+# Check 9: Model Router receipts exist
 echo ""
-echo "Check 6: Model Router receipts exist"
+echo "Check 9: Model Router receipts exist"
 if ls "$MODEL_RECEIPTS_DIR"/*.json 2>/dev/null | head -1 | grep -q ".json"; then
     ok "Model Router receipts found in $MODEL_RECEIPTS_DIR"
 else
     warn "No Model Router receipts found in $MODEL_RECEIPTS_DIR (may be OK if receipts not enabled)"
 fi
 
-# Check 7: Secret detection in receipts
+# Check 10: Secret detection in receipts
 echo ""
-echo "Check 7: Secret detection in receipts"
+echo "Check 10: Secret detection in receipts"
 
 SECRET_WORDS="password api_key token secret credential"
 FOUND_SECRETS=0

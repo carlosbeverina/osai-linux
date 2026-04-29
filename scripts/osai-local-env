@@ -20,6 +20,9 @@ fi
 # Model Router
 export OSAI_MODEL_ROUTER_URL="${OSAI_MODEL_ROUTER_URL:-http://127.0.0.1:8088}"
 
+# osai-api (local HTTP service for OSAI agent capabilities)
+export OSAI_API_URL="${OSAI_API_URL:-http://127.0.0.1:8090}"
+
 # llama.cpp (via osai-llamacpp-env may have set some already; apply defaults here)
 export OSAI_LLAMACPP_BASE_URL="${OSAI_LLAMACPP_BASE_URL:-http://127.0.0.1:8092/v1}"
 export OSAI_LLAMACPP_API_KEY="${OSAI_LLAMACPP_API_KEY:-osai-local-dev-token}"

@@ -6,8 +6,6 @@
 use anyhow::Result;
 use osai_agent_core::{
     apply::run_apply,
-    ask::run_ask,
-    chat::run_chat,
     shared::{
         default_apply_receipts_dir, default_ask_receipts_dir, default_chat_receipts_dir,
         is_loopback_url,
@@ -228,7 +226,7 @@ async fn handle_chat(stream: &mut tokio::net::TcpStream, body: &[u8]) -> Result<
             stream,
             400,
             &format!(
-                "model_router_url must be loopback only (127.0.0.1 or localhost): {}",
+                "model router URL must be loopback only (127.0.0.1 or localhost): {}",
                 model_router_url
             ),
         )
@@ -245,24 +243,24 @@ async fn handle_chat(stream: &mut tokio::net::TcpStream, body: &[u8]) -> Result<
         .map(PathBuf::from)
         .unwrap_or_else(default_chat_receipts_dir);
 
-    let result = run_chat(
-        Some(&req.message),
+    // Call chat_core_async from osai-agent-core (respects architecture boundary)
+    let result = osai_agent_core::chat_core_async(
+        &req.message,
         &model_router_url,
         Some(&receipts_path),
         &model,
         &privacy,
         req.max_tokens,
         temperature,
-        false,
-        &[],
-    );
+    )
+    .await;
 
     let resp = match result {
-        Ok(()) => ChatResponseV1 {
-            status: "success".to_string(),
-            content: None,
-            response_length: None,
-            error: None,
+        Ok(r) => ChatResponseV1 {
+            status: r.status,
+            content: r.content,
+            response_length: r.response_length,
+            error: r.error,
         },
         Err(e) => ChatResponseV1 {
             status: "error".to_string(),
@@ -321,8 +319,9 @@ async fn handle_ask(stream: &mut tokio::net::TcpStream, body: &[u8]) -> Result<(
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("./generated/plans"));
 
-    let result = run_ask(
-        Some(&req.request),
+    // Call ask_core_async from osai-agent-core (respects architecture boundary)
+    let result = osai_agent_core::ask_core_async(
+        &req.request,
         &model_router_url,
         Some(&receipts_path),
         Some(&plans_path),
@@ -330,18 +329,15 @@ async fn handle_ask(stream: &mut tokio::net::TcpStream, body: &[u8]) -> Result<(
         &privacy,
         req.max_tokens,
         temperature,
-        false,
-        false,
-        None,
-        &[],
-    );
+    )
+    .await;
 
     let resp = match result {
-        Ok(()) => AskResponseV1 {
-            status: "success".to_string(),
-            output_path: None,
-            validation: "valid".to_string(),
-            error: None,
+        Ok(r) => AskResponseV1 {
+            status: r.status,
+            output_path: r.output_path,
+            validation: r.validation,
+            error: r.error,
         },
         Err(e) => AskResponseV1 {
             status: "error".to_string(),

@@ -27,6 +27,13 @@ if systemctl --user list-unit-files | grep -q "^osai-vllm.service"; then
     fi
 fi
 
+if systemctl --user list-unit-files | grep -q "^osai-api.service"; then
+    if systemctl --user is-active --quiet osai-api.service 2>/dev/null; then
+        echo "Stopping osai-api.service..."
+        systemctl --user stop osai-api.service 2>/dev/null || true
+    fi
+fi
+
 echo ""
 echo "Note: If services were started with osai-local-up (foreground),"
 echo "      stop them with Ctrl+C in that terminal."

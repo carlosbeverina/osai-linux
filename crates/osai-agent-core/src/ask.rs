@@ -91,6 +91,298 @@ fn write_ask_receipt(
     Ok(())
 }
 
+/// Internal async model call for ask operations.
+async fn ask_model_call_async(
+    model_router_url: &str,
+    model: &str,
+    privacy: &str,
+    max_tokens: Option<u32>,
+    temperature: f32,
+    system_prompt: &str,
+    request: &str,
+) -> Result<String> {
+    let chat_request = ChatRequest {
+        model: model.to_string(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: request.to_string(),
+            },
+        ],
+        max_tokens: max_tokens.or(Some(1200)),
+        temperature,
+        metadata: ChatMetadata {
+            privacy: privacy.to_string(),
+        },
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
+
+    let url = format!("{}/v1/chat/completions", model_router_url);
+
+    let response = client
+        .post(&url)
+        .json(&chat_request)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Model router request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "Model router returned error {}: {}",
+            status,
+            body
+        ));
+    }
+
+    let chat_response: ChatResponse = response
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse model router response: {}", e))?;
+
+    let content = chat_response
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("Model response missing content"))?
+        .clone();
+
+    Ok(content)
+}
+
+/// Async core ask logic - generates a plan and returns AskResult.
+/// Use this from async API contexts (osai-api).
+pub async fn ask_core_async(
+    request: &str,
+    model_router_url: &str,
+    receipts_dir_override: Option<&Path>,
+    plans_dir_override: Option<&Path>,
+    model: &str,
+    privacy: &str,
+    max_tokens: Option<u32>,
+    temperature: f32,
+) -> Result<AskResult> {
+    // Validate loopback URL
+    if !is_loopback_url(model_router_url) {
+        return Err(anyhow::anyhow!(
+            "Model router URL must be loopback only (127.0.0.1 or localhost): {}",
+            model_router_url
+        ));
+    }
+
+    let request_length = request.len();
+
+    // Build system prompt for safe plan generation
+    let system_prompt = r#"You are an OSAI plan generator. Return ONLY valid OSAI Plan DSL YAML with no markdown fences, no explanation, and no additional text.
+
+## REQUIRED YAML SCHEMA
+
+Your output MUST match this exact top-level structure:
+version: "0.1"
+id: "<generate a fresh UUID v4>"
+title: "<short title>"
+description: "<one-sentence description>"
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "step-1"
+    action:
+      type: FilesList
+    description: "<what this step does>"
+    requires_approval: false
+    inputs:
+      path: "~/Downloads"
+rollback:
+  available: false
+metadata: {}
+
+## CRITICAL RULES
+
+1. Use `steps:` — NEVER use `plan:` or any other top-level key for the action list.
+2. Use exact action types: FilesList, FilesMove, FilesWrite, ModelChat, ReceiptCreate, DesktopNotify, BrowserOpenUrl, ShellRunSandboxed, Custom. Do NOT invent names like ListDirectory or ReadFile.
+3. Each step needs id, action.type, description, requires_approval, inputs.
+4. For listing a directory, use:
+   action:
+     type: FilesList
+   inputs:
+     path: "~/Downloads"
+5. Omit rollback entirely (or use: rollback: ~). Do not add rollback.steps unless rollback is obvious.
+6. Use metadata: {}.
+7. Generate a fresh UUID v4 for id — do not reuse the example UUID.
+
+## VALID EXAMPLE
+
+For the request "List my Downloads folder", output exactly:
+
+version: "0.1"
+id: "00000000-0000-4000-8000-000000000001"
+title: "List Downloads folder"
+description: "List files in the user's Downloads folder"
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "step-1"
+    action:
+      type: FilesList
+    description: "List files in Downloads"
+    requires_approval: false
+    inputs:
+      path: "~/Downloads"
+metadata: {}
+
+## SAFETY
+
+- Do NOT include ShellRunSandboxed unless user explicitly asks to run a command.
+- Do NOT include FilesWrite, FilesMove, FilesDelete (refuse destructive actions).
+- Prefer ModelChat or ReceiptCreate for information-only tasks.
+- risk: Low by default, Medium only with clear justification.
+- approval: Auto for read-only, Ask for anything that modifies state."#;
+
+    // Call model asynchronously
+    let content = match ask_model_call_async(
+        model_router_url,
+        model,
+        privacy,
+        max_tokens,
+        temperature,
+        system_prompt,
+        request,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            // Write failed receipt
+            let _ = write_ask_receipt(
+                receipts_dir_override,
+                model_router_url,
+                model,
+                privacy,
+                request_length,
+                None,
+                "Failed",
+                Some(&format!("Model router call failed: {}", e)),
+            );
+            return Err(anyhow::anyhow!("Model router call failed: {}", e));
+        }
+    };
+
+    // Sanitize YAML response (strip markdown fences if present)
+    let yaml_content = sanitize_yaml_response(&content);
+
+    // Try to parse as OSAI Plan
+    let mut plan = match OsaiPlan::from_yaml(&yaml_content) {
+        Ok(p) => p,
+        Err(e) => {
+            // Write failed receipt
+            let _ = write_ask_receipt(
+                receipts_dir_override,
+                model_router_url,
+                model,
+                privacy,
+                request_length,
+                None,
+                "Failed",
+                Some(&format!("YAML parse error: {}", e)),
+            );
+            return Err(anyhow::anyhow!(
+                "Model returned invalid YAML: {}\nRaw response: {}",
+                e,
+                yaml_content.chars().take(200).collect::<String>()
+            ));
+        }
+    };
+
+    // Validate plan
+    if let Err(e) = plan.validate() {
+        // Write failed receipt
+        let _ = write_ask_receipt(
+            receipts_dir_override,
+            model_router_url,
+            model,
+            privacy,
+            request_length,
+            None,
+            "Failed",
+            Some(&format!("Validation error: {}", e)),
+        );
+        return Err(anyhow::anyhow!(
+            "Generated plan is invalid: {}\nYAML:\n{}",
+            e,
+            yaml_content
+        ));
+    }
+
+    // Replace example UUID with a fresh generated UUID
+    let example_uuid = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").ok();
+    if let Some(expected) = example_uuid {
+        if plan.id == expected {
+            plan.id = uuid::Uuid::new_v4();
+        }
+    }
+
+    // Determine output path
+    let plans_dir = plans_dir_override.unwrap_or_else(|| Path::new("./generated/plans"));
+    let slug = slug_from_request(request);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let filename = format!("{}-{}.yml", slug, timestamp);
+    let output_path = plans_dir.join(&filename);
+
+    // Check if path already exists
+    if output_path.exists() {
+        return Err(anyhow::anyhow!(
+            "Generated plan path already exists: {}",
+            output_path.display()
+        ));
+    }
+
+    // Create parent directories if needed
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("Failed to create plans directory: {}", e))?;
+    }
+
+    // Save plan
+    let yaml_output = plan
+        .to_yaml()
+        .map_err(|e| anyhow::anyhow!("Failed to serialize plan to YAML: {}", e))?;
+    fs::write(&output_path, &yaml_output)
+        .map_err(|e| anyhow::anyhow!("Failed to write plan file: {}", e))?;
+
+    // Write success receipt
+    let _ = write_ask_receipt(
+        receipts_dir_override,
+        model_router_url,
+        model,
+        privacy,
+        request_length,
+        Some(&output_path),
+        "Executed",
+        None,
+    );
+
+    Ok(AskResult {
+        status: "success".to_string(),
+        output_path: Some(output_path.display().to_string()),
+        validation: "valid".to_string(),
+        error: None,
+    })
+}
+
 /// Runs an ask operation - generates a safe OSAI Plan DSL YAML from a natural language request.
 pub fn run_ask(
     message_arg: Option<&str>,

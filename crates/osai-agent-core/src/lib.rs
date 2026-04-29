@@ -9,6 +9,6 @@ pub mod chat;
 pub mod shared;
 
 pub use apply::{run_apply, ApplyResult};
-pub use ask::{run_ask, AskResult};
-pub use chat::{run_chat, ChatResult};
+pub use ask::{ask_core_async, run_ask, AskResult};
+pub use chat::{chat_core_async, run_chat, ChatResult};
 pub use shared::{is_loopback_url, step_to_request, ChatRequest, ChatResponse};

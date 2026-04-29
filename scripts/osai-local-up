@@ -1,5 +1,5 @@
 #!/bin/bash
-# OSAI Local Runtime Up - Start llama.cpp and Model Router together
+# OSAI Local Runtime Up - Start llama.cpp, Model Router, and osai-api together
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,20 +10,26 @@ source "${SCRIPT_DIR}/osai-local-env"
 
 LLAMACPP_PID=""
 ROUTER_PID=""
+OSAI_API_PID=""
 ROUTER_VENV="${REPO_ROOT}/services/model-router/.venv"
 
 cleanup() {
     echo ""
     echo "=== Stopping services ==="
-    if [[ -n "$LLAMACPP_PID" ]] && kill -0 "$LLAMACPP_PID" 2>/dev/null; then
-        echo "Stopping llama-server (PID $LLAMACPP_PID)..."
-        kill "$LLAMACPP_PID" 2>/dev/null || true
-        wait "$LLAMACPP_PID" 2>/dev/null || true
+    if [[ -n "$OSAI_API_PID" ]] && kill -0 "$OSAI_API_PID" 2>/dev/null; then
+        echo "Stopping osai-api (PID $OSAI_API_PID)..."
+        kill "$OSAI_API_PID" 2>/dev/null || true
+        wait "$OSAI_API_PID" 2>/dev/null || true
     fi
     if [[ -n "$ROUTER_PID" ]] && kill -0 "$ROUTER_PID" 2>/dev/null; then
         echo "Stopping Model Router (PID $ROUTER_PID)..."
         kill "$ROUTER_PID" 2>/dev/null || true
         wait "$ROUTER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$LLAMACPP_PID" ]] && kill -0 "$LLAMACPP_PID" 2>/dev/null; then
+        echo "Stopping llama-server (PID $LLAMACPP_PID)..."
+        kill "$LLAMACPP_PID" 2>/dev/null || true
+        wait "$LLAMACPP_PID" 2>/dev/null || true
     fi
     echo "Done."
     exit 0
@@ -44,6 +50,12 @@ if ss -tlnp 2>/dev/null | grep -q ':8088 '; then
     exit 1
 fi
 
+if ss -tlnp 2>/dev/null | grep -q ':8090 '; then
+    echo "FAIL: Port 8090 (osai-api) is already in use."
+    echo "Stop the existing process or use a different port."
+    exit 1
+fi
+
 # Check model file exists
 if [[ ! -f "${OSAI_LLAMACPP_MODEL_PATH}" ]]; then
     echo "Missing GGUF model. Expected: ${OSAI_LLAMACPP_MODEL_PATH}"
@@ -55,6 +67,16 @@ if [[ ! -d "$ROUTER_VENV" ]]; then
     echo "Model Router venv not found at: ${ROUTER_VENV}"
     echo "Run: cd services/model-router && python3 -m venv .venv && source .venv/bin/activate && pip install -e '.[dev]'"
     exit 1
+fi
+
+# Check osai-api binary exists
+OSAI_API_BIN="${REPO_ROOT}/target/debug/osai-api"
+if [[ ! -f "$OSAI_API_BIN" ]]; then
+    echo "Building osai-api..."
+    cargo build -p osai-api -q || {
+        echo "Failed to build osai-api"
+        exit 1
+    }
 fi
 
 echo "=== Starting OSAI Local Runtime ==="
@@ -131,11 +153,42 @@ if ! curl -s --max-time 2 -o /dev/null http://127.0.0.1:8088/health 2>/dev/null;
 fi
 
 echo ""
+
+# Start osai-api in background
+echo "Starting osai-api..."
+"$OSAI_API_BIN" &
+OSAI_API_PID=$!
+
+# Wait for osai-api to be ready
+echo "Waiting for osai-api on port 8090..."
+for i in {1..15}; do
+    if curl -s --max-time 2 -o /dev/null http://127.0.0.1:8090/health 2>/dev/null; then
+        echo "osai-api is ready (PID $OSAI_API_PID)"
+        break
+    fi
+    if ! kill -0 "$OSAI_API_PID" 2>/dev/null; then
+        echo "osai-api exited unexpectedly."
+        kill "$LLAMACPP_PID" "$ROUTER_PID" 2>/dev/null || true
+        exit 1
+    fi
+    sleep 1
+done
+
+if ! curl -s --max-time 2 -o /dev/null http://127.0.0.1:8090/health 2>/dev/null; then
+    echo "osai-api did not become ready in time."
+    kill "$LLAMACPP_PID" "$ROUTER_PID" "$OSAI_API_PID" 2>/dev/null || true
+    exit 1
+fi
+
+echo ""
 echo "=== OSAI Local Runtime is running ==="
-echo "llama-server PID:  $LLAMACPP_PID"
-echo "Model Router PID:    $ROUTER_PID"
+echo ""
+echo "Service URLs:"
+echo "  llama-server:   http://127.0.0.1:8092/v1  (PID $LLAMACPP_PID)"
+echo "  Model Router:   http://127.0.0.1:8088      (PID $ROUTER_PID)"
+echo "  osai-api:       http://127.0.0.1:8090      (PID $OSAI_API_PID)"
 echo ""
 echo "Press Ctrl+C to stop."
 
 # Wait indefinitely (trap will clean up)
-wait "$LLAMACPP_PID" "$ROUTER_PID" 2>/dev/null || true
+wait "$LLAMACPP_PID" "$ROUTER_PID" "$OSAI_API_PID" 2>/dev/null || true

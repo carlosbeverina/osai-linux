@@ -21,33 +21,50 @@ The safety model ensures that even a compromised or misbehaving model cannot dir
 ```
 User
   │
-  ▼
-osai-agent CLI (chat | ask | apply)
+  ├──▶ osai-agent CLI (chat | ask | apply)
+  │      │
+  │      ├──▶ chat ──▶ Model Router ──▶ Gemma/MiniMax
+  │      │                      │
+  │      │                      ▼
+  │      │                 Receipt Logger
+  │      │
+  │      ├──▶ ask ──▶ Model Router ──▶ Gemma (plan generation)
+  │      │                      │              │
+  │      │                      ▼              ▼
+  │      │                 Receipt Logger  Plan DSL YAML (validated)
+  │      │
+  │      └──▶ apply ──▶ Plan DSL (validated)
+  │                    │
+  │                    ▼
+  │              ToolBroker (authorized)
+  │                    │
+  │                    ├──▶ ToolExecutor ──▶ Receipt Logger
+  │                    │       (safe actions only)
+  │                    │
+  │                    └──▶ Model Router ──▶ Gemma (when needed)
   │
-  ├──▶ chat ──▶ Model Router ──▶ Gemma/MiniMax
-  │                      │
-  │                      ▼
-  │                 Receipt Logger
-  │
-  ├──▶ ask ──▶ Model Router ──▶ Gemma (plan generation)
-  │                      │              │
-  │                      ▼              ▼
-  │                 Receipt Logger  Plan DSL YAML (validated)
-  │
-  └──▶ apply ──▶ Plan DSL (validated)
-                    │
-                    ▼
-              ToolBroker (authorized)
-                    │
-                    ├──▶ ToolExecutor ──▶ Receipt Logger
-                    │       (safe actions only)
-                    │
-                    └──▶ Model Router ──▶ Gemma (when needed)
+  └──▶ osai-api (future desktop/shell UI)
+         │
+         ├──▶ /v1/chat ──▶ Model Router ──▶ Gemma/MiniMax
+         ├──▶ /v1/ask ──▶ Model Router ──▶ Gemma (plan generation)
+         ├──▶ /v1/plans/validate ──▶ Plan DSL validation
+         └──▶ /v1/apply ──▶ ToolBroker ──▶ ToolExecutor ──▶ Receipt Logger
 ```
 
 ### 2.2 Future Path to Production
 
 ```
+OSAI Desktop/Shell UI
+        │
+        ▼
+osai-api (local HTTP service)
+        │
+        ├──▶ Model Router ──▶ llama.cpp ──▶ Gemma 4
+        │
+        ├──▶ ToolBroker ──▶ ToolExecutor
+        │
+        └──▶ Receipt Logger
+
 OpenClaw Bridge          # Protocol gateway for agent communication
 Voice Daemon             # Push-to-talk voice intent
 OSAI Command Bar          # Core UI for agent interaction
@@ -195,6 +212,35 @@ Fedora Atomic / Universal Blue / BlueBuild
 - Default receipts dir: `~/.local/share/osai/receipts/model-router`
 - Binds to 127.0.0.1:8088
 - Restart on failure
+
+### 3.9 osai-api
+
+**Purpose**: Local HTTP service exposing OSAI agent capabilities via `osai-agent-core`. Provides a programmatic API for future desktop/shell UI without shelling out to `osai-agent-cli`.
+
+**API Endpoints**:
+- `GET /health` - Health check with service/version
+- `GET /v1/capabilities` - Returns `{chat, ask, plan_validate, apply, receipts}: true`
+- `POST /v1/chat` - Chat with model router (configurable URL, receipts persisted)
+- `POST /v1/ask` - Generate Plan DSL from natural language (receipts/plans persisted)
+- `POST /v1/plans/validate` - Validate plan YAML/JSON file
+- `POST /v1/apply` - Validate+authorize+execute a plan (dry_run=true by default)
+- `POST /chat`, `/ask`, `/apply` - Compatibility aliases to `/v1/*`
+
+**Request Configuration**:
+All endpoints accept optional `model_router_url`, `receipts_dir`, `plans_dir` fields to override defaults.
+
+**Safety Properties**:
+- Binds to 127.0.0.1:8090 only (no external interface exposure)
+- Validates model_router_url is loopback before any request
+- Uses osai-agent-core directly (no CLI subprocess)
+- dry_run defaults to true for /v1/apply (execution requires explicit `"dry_run": false`)
+- Full prompts not stored in receipts (redacted metadata only)
+
+**Current Limitations**:
+- No authentication (future desktop UI handles auth)
+- No streaming responses
+- No WebSocket support yet
+- Single-user only
 
 ## 4. Current CLI Commands
 
@@ -422,27 +468,28 @@ Agents and tools never call MiniMax directly. All model traffic flows through Mo
 
 ## 8. Development Workflow
 
-### 8.1 Starting Model Router
+### 8.1 Starting Local Runtime
 
 ```bash
-# Option 1: Foreground (for development)
-./scripts/osai-dev-up
+# Start llama.cpp + Model Router + osai-api (foreground supervision)
+./scripts/osai-local-up
 
-# Option 2: Background service
-./scripts/osai-install-user-services
-systemctl --user enable --now osai-model-router.service
+# Or start individual services:
+./scripts/osai-llamacpp-up      # llama.cpp only
+./scripts/osai-dev-up           # Model Router only
+cargo run -p osai-api           # osai-api only (from repo root)
 ```
 
 ### 8.2 Checking Health
 
 ```bash
-./scripts/osai-dev-check
-```
+# Full stack check (llama.cpp, Model Router, osai-api, tool receipts, secrets)
+./scripts/osai-local-check
 
-This checks:
-- `/health` endpoint
-- `/v1/models` endpoint
-- `/v1/chat/completions` with a test request
+# Individual checks:
+./scripts/osai-dev-check        # Model Router only
+./scripts/osai-llamacpp-check   # llama.cpp only
+```
 
 ### 8.3 Stopping Services
 
