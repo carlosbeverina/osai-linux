@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// ============================================================================
+// Public Types
+// ============================================================================
+
 /// Result of an apply operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyResult {
@@ -23,6 +27,231 @@ pub struct ApplyResult {
     pub dry_run: bool,
     pub error: Option<String>,
 }
+
+/// Authorization preview for a single step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepPreview {
+    pub id: String,
+    pub action: String,
+    pub allowed: bool,
+    pub approval_required: bool,
+    pub mode: String,
+    pub reason: Option<String>,
+}
+
+/// Authorization preview result for a plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorizePreviewResult {
+    pub ok: bool,
+    pub plan_id: String,
+    pub summary: AuthorizeSummary,
+    pub steps: Vec<StepPreview>,
+    pub error: Option<String>,
+}
+
+/// Summary counts for authorization preview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorizeSummary {
+    pub allowed: u32,
+    pub denied: u32,
+    pub approval_required: u32,
+}
+
+// ============================================================================
+// Authorization Preview (no execution)
+// ============================================================================
+
+/// Checks if a path is within any of the allowed roots.
+/// Expands ~ and resolves relative paths before comparison.
+fn is_path_in_allowed_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {
+    if allowed_roots.is_empty() {
+        return true; // No restriction
+    }
+
+    let path_str = path.to_string_lossy();
+    let expanded_path: PathBuf = if path_str.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join(path_str.trim_start_matches("~/"))
+        } else {
+            path.to_path_buf()
+        }
+    } else {
+        path.to_path_buf()
+    };
+
+    let canonical_path = match std::fs::canonicalize(&expanded_path) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    for root in allowed_roots {
+        let root_str = root.to_string_lossy();
+        let expanded_root: PathBuf = if root_str.starts_with("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                PathBuf::from(home).join(root_str.trim_start_matches("~/"))
+            } else {
+                root.clone()
+            }
+        } else {
+            root.clone()
+        };
+
+        let canonical_root = match std::fs::canonicalize(&expanded_root) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        if canonical_path.starts_with(&canonical_root) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Authorize a plan without executing it. Returns preview of authorization decisions.
+pub fn authorize_plan_preview(
+    plan_path: &PathBuf,
+    policy_path: &PathBuf,
+    allowed_roots: &[PathBuf],
+    approve: &[String],
+    approve_all: bool,
+) -> Result<AuthorizePreviewResult> {
+    // Read and parse plan
+    let plan_content = fs::read_to_string(plan_path)
+        .with_context(|| format!("failed to read plan file: {}", plan_path.display()))?;
+    let plan = match OsaiPlan::from_yaml(&plan_content) {
+        Ok(p) => p,
+        Err(_) => OsaiPlan::from_json(&plan_content)
+            .with_context(|| format!("failed to parse plan file: {}", plan_path.display()))?,
+    };
+
+    // Validate plan
+    if let Err(e) = plan.validate() {
+        return Err(anyhow::anyhow!("plan validation failed: {}", e));
+    }
+
+    // Read and parse policy
+    let policy_content = fs::read_to_string(policy_path)
+        .with_context(|| format!("failed to read policy file: {}", policy_path.display()))?;
+    let policy = ToolPolicy::from_yaml(&policy_content)
+        .map_err(|e| anyhow::anyhow!("policy parse failed: {}", e))?;
+
+    // Create store and broker (no receipts needed for preview)
+    let receipts_dir = default_apply_receipts_dir();
+    let store = ReceiptStore::new(&receipts_dir);
+    store.ensure_dirs().ok();
+    let broker = ToolBroker::new(policy.clone(), store);
+
+    // Authorize each step and collect decisions
+    let mut denied_count = 0u32;
+    let mut approval_required_count = 0u32;
+    let mut allowed_count = 0u32;
+    let mut step_previews = Vec::new();
+    let approve_set: std::collections::HashSet<&str> = approve.iter().map(|s| s.as_str()).collect();
+
+    for step in &plan.steps {
+        let request = step_to_request(&plan, step);
+        let decision = broker
+            .authorize(&request)
+            .with_context(|| format!("authorization failed for step: {}", step.id))?;
+
+        let action_name = request.action_name();
+
+        // For filesystem actions, also check allowed_roots
+        let path_in_allowed = match &step.action {
+            osai_plan_dsl::ActionKind::FilesList
+            | osai_plan_dsl::ActionKind::FilesRead
+            | osai_plan_dsl::ActionKind::FilesWrite
+            | osai_plan_dsl::ActionKind::FilesMove
+            | osai_plan_dsl::ActionKind::FilesDelete => {
+                let path_str = step
+                    .inputs
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let path = PathBuf::from(path_str);
+                is_path_in_allowed_roots(&path, allowed_roots)
+            }
+            _ => true,
+        };
+
+        // Denied steps cannot be overridden by approve flags
+        if !decision.allowed || !path_in_allowed {
+            denied_count += 1;
+            let reason = if !path_in_allowed {
+                format!(
+                    "Path {}{} is outside allowed roots",
+                    step.inputs
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
+                    if decision.allowed {
+                        format!("; ToolBroker reason: {}", decision.reason)
+                    } else {
+                        String::new()
+                    }
+                )
+            } else {
+                decision.reason
+            };
+            step_previews.push(StepPreview {
+                id: step.id.clone(),
+                action: action_name,
+                allowed: false,
+                approval_required: false,
+                mode: format!("{:?}", decision.policy_mode),
+                reason: Some(reason),
+            });
+            continue;
+        }
+
+        // Approval-required steps
+        if decision.requires_user_approval {
+            let is_explicitly_approved = approve_all || approve_set.contains(step.id.as_str());
+            approval_required_count += 1;
+            step_previews.push(StepPreview {
+                id: step.id.clone(),
+                action: action_name,
+                allowed: true,
+                approval_required: true,
+                mode: format!("{:?}", decision.policy_mode),
+                reason: if is_explicitly_approved {
+                    Some(format!("Explicitly approved via CLI: {}", decision.reason))
+                } else {
+                    Some(decision.reason)
+                },
+            });
+        } else {
+            allowed_count += 1;
+            step_previews.push(StepPreview {
+                id: step.id.clone(),
+                action: action_name,
+                allowed: true,
+                approval_required: false,
+                mode: format!("{:?}", decision.policy_mode),
+                reason: Some(decision.reason),
+            });
+        }
+    }
+
+    Ok(AuthorizePreviewResult {
+        ok: true,
+        plan_id: plan.id.to_string(),
+        summary: AuthorizeSummary {
+            allowed: allowed_count,
+            denied: denied_count,
+            approval_required: approval_required_count,
+        },
+        steps: step_previews,
+        error: None,
+    })
+}
+
+// ============================================================================
+// Receipt Writing
+// ============================================================================
 
 fn write_apply_receipt(
     receipts_dir: &PathBuf,

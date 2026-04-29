@@ -1,8 +1,8 @@
 //! Ask operation - generates OSAI Plan DSL YAML from natural language.
 
 use crate::shared::{
-    default_ask_receipts_dir, is_loopback_url, sanitize_yaml_response, slug_from_request,
-    ChatMessage, ChatMetadata, ChatRequest, ChatResponse,
+    default_ask_plans_dir, default_ask_receipts_dir, is_loopback_url, sanitize_yaml_response,
+    slug_from_request, ChatMessage, ChatMetadata, ChatRequest, ChatResponse,
 };
 use anyhow::Result;
 use osai_plan_dsl::OsaiPlan;
@@ -332,8 +332,10 @@ metadata: {}
         }
     }
 
-    // Determine output path
-    let plans_dir = plans_dir_override.unwrap_or_else(|| Path::new("./generated/plans"));
+    // Determine output path using persistent XDG location
+    let plans_dir = plans_dir_override
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| default_ask_plans_dir());
     let slug = slug_from_request(request);
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -363,6 +365,10 @@ metadata: {}
     fs::write(&output_path, &yaml_output)
         .map_err(|e| anyhow::anyhow!("Failed to write plan file: {}", e))?;
 
+    // Canonicalize to get absolute path for the response
+    let absolute_output_path = std::fs::canonicalize(&output_path)
+        .map_err(|e| anyhow::anyhow!("Failed to resolve absolute path: {}", e))?;
+
     // Write success receipt
     let _ = write_ask_receipt(
         receipts_dir_override,
@@ -377,7 +383,7 @@ metadata: {}
 
     Ok(AskResult {
         status: "success".to_string(),
-        output_path: Some(output_path.display().to_string()),
+        output_path: Some(absolute_output_path.display().to_string()),
         validation: "valid".to_string(),
         error: None,
     })
@@ -621,7 +627,7 @@ metadata: {}
         }
     }
 
-    // Determine output path
+    // Determine output path using persistent XDG location
     let output_path = if let Some(path) = output_override {
         if path.exists() {
             return Err(anyhow::anyhow!(
@@ -631,7 +637,9 @@ metadata: {}
         }
         path.to_path_buf()
     } else {
-        let plans_dir = plans_dir_override.unwrap_or_else(|| Path::new("./generated/plans"));
+        let plans_dir = plans_dir_override
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| default_ask_plans_dir());
         let slug = slug_from_request(&request);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -701,4 +709,55 @@ metadata: {}
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_ask_plans_dir_is_persistent() {
+        let plans_dir = default_ask_plans_dir();
+        let plans_dir_str = plans_dir.to_string_lossy();
+        // Should not be a temp dir
+        assert!(
+            !plans_dir_str.contains("tmp"),
+            "default plans dir should not be in tmp"
+        );
+        // Should be under osai
+        assert!(
+            plans_dir_str.contains("osai"),
+            "default plans dir should be under osai"
+        );
+    }
+
+    #[test]
+    fn test_ask_result_serialization() {
+        let result = AskResult {
+            status: "success".to_string(),
+            output_path: Some("/home/user/.local/share/osai/plans/test-123.yml".to_string()),
+            validation: "valid".to_string(),
+            error: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("success"));
+        assert!(json.contains(".local/share/osai/plans"));
+    }
+
+    #[test]
+    fn test_ask_result_with_error() {
+        let result = AskResult {
+            status: "error".to_string(),
+            output_path: None,
+            validation: "invalid".to_string(),
+            error: Some("model failed".to_string()),
+        };
+        assert_eq!(result.status, "error");
+        assert!(result.output_path.is_none());
+        assert!(result.error.is_some());
+    }
 }

@@ -218,13 +218,23 @@ Fedora Atomic / Universal Blue / BlueBuild
 **Purpose**: Local HTTP service exposing OSAI agent capabilities via `osai-agent-core`. Provides a programmatic API for future desktop/shell UI without shelling out to `osai-agent-cli`.
 
 **API Endpoints**:
+
+Core (existing):
 - `GET /health` - Health check with service/version
-- `GET /v1/capabilities` - Returns `{chat, ask, plan_validate, apply, receipts}: true`
+- `GET /v1/capabilities` - Returns `{chat, ask, plan_validate, plan_authorize, apply, plans, receipts}: true`
 - `POST /v1/chat` - Chat with model router (configurable URL, receipts persisted)
 - `POST /v1/ask` - Generate Plan DSL from natural language (receipts/plans persisted)
 - `POST /v1/plans/validate` - Validate plan YAML/JSON file
 - `POST /v1/apply` - Validate+authorize+execute a plan (dry_run=true by default)
 - `POST /chat`, `/ask`, `/apply` - Compatibility aliases to `/v1/*`
+
+New UI-ready endpoints:
+- `GET /v1/status` - Local stack/service status with Model Router reachability check
+- `GET /v1/plans` - List generated plans (sorted newest first, limit/max 100)
+- `GET /v1/plans/read?path=...` - Read one plan for UI preview
+- `POST /v1/plans/authorize` - Preview plan authorization without executing
+- `GET /v1/receipts` - List recent receipts (chat/ask/apply/tool/model-router)
+- `GET /v1/receipts/read?path=...` - Read one receipt with secret redaction
 
 **Request Configuration**:
 All endpoints accept optional `model_router_url`, `receipts_dir`, `plans_dir` fields to override defaults.
@@ -235,12 +245,25 @@ All endpoints accept optional `model_router_url`, `receipts_dir`, `plans_dir` fi
 - Uses osai-agent-core directly (no CLI subprocess)
 - dry_run defaults to true for /v1/apply (execution requires explicit `"dry_run": false`)
 - Full prompts not stored in receipts (redacted metadata only)
+- Secret redaction on receipt read (api_key, token, password, secret, credential, authorization)
+- /v1/plans/authorize does NOT execute ToolExecutor (preview only)
+- /v1/plans/read does NOT expose full file contents by default
 
 **Current Limitations**:
 - No authentication (future desktop UI handles auth)
 - No streaming responses
 - No WebSocket support yet
 - Single-user only
+
+**Recommended UI Flow**:
+1. `GET /v1/status` - Check local stack health
+2. `POST /v1/chat` or `POST /v1/ask` - Interact with model
+3. `GET /v1/plans` / `GET /v1/plans/read` - Browse and preview plans
+4. `POST /v1/plans/validate` - Validate plan before authorization
+5. `POST /v1/plans/authorize` - Preview authorization decisions
+6. `POST /v1/apply` with `dry_run=true` - Simulate execution
+7. `POST /v1/apply` with `dry_run=false` - Execute after explicit user approval
+8. `GET /v1/receipts` - Audit history after execution
 
 ## 4. Current CLI Commands
 

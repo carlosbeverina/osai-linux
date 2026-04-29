@@ -157,3 +157,12 @@ pub fn default_apply_receipts_dir() -> PathBuf {
         .join("receipts")
         .join("apply")
 }
+
+/// Default plans directory for ask/generated plans.
+/// Uses XDG data dir for persistence: ~/.local/share/osai/plans
+pub fn default_ask_plans_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("osai")
+        .join("plans")
+}

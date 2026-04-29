@@ -68,6 +68,37 @@ else
     fail "osai-api /v1/capabilities failed or missing chat: $CAPABILITIES"
 fi
 
+if echo "$CAPABILITIES" | grep -q '"plan_authorize":true'; then
+    ok "osai-api capabilities include plan_authorize"
+else
+    fail "osai-api /v1/capabilities missing plan_authorize: $CAPABILITIES"
+fi
+
+if echo "$CAPABILITIES" | grep -q '"plans":true'; then
+    ok "osai-api capabilities include plans"
+else
+    fail "osai-api /v1/capabilities missing plans: $CAPABILITIES"
+fi
+
+if echo "$CAPABILITIES" | grep -q '"receipts":true'; then
+    ok "osai-api capabilities include receipts"
+else
+    fail "osai-api /v1/capabilities missing receipts: $CAPABILITIES"
+fi
+
+# Check 4b: osai-api /v1/status (optional - don't fail if model router down)
+echo ""
+echo "Check 4b: osai-api /v1/status"
+STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    --max-time 10 \
+    "${OSAI_API_URL}/v1/status" 2>&1) || true
+
+if [[ "$STATUS_CODE" == "200" ]]; then
+    ok "osai-api /v1/status returned HTTP $STATUS_CODE"
+else
+    warn "osai-api /v1/status returned HTTP $STATUS_CODE (expected 200)"
+fi
+
 # Check 5: Model Router returns non-mock response for local_only
 echo ""
 echo "Check 5: POST /v1/chat/completions (osai-auto local_only, non-mock)"
