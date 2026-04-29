@@ -8,6 +8,10 @@ set -euo pipefail
 # Resolve repo root (one level up from scripts/)
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Workspace root for compile-time path resolution (used by osai-api, osai-agent-cli)
+# This ensures policy paths resolve correctly regardless of where the binary is run from
+export OSAI_REPO_ROOT="${REPO_ROOT}"
+
 # Source supporting environments if present
 if [[ -f "${REPO_ROOT}/scripts/osai-llamacpp-env" ]]; then
     source "${REPO_ROOT}/scripts/osai-llamacpp-env"

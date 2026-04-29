@@ -761,3 +761,120 @@ mod tests {
         assert!(result.error.is_some());
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod policy_tests {
+    use crate::{default_policy_path, resolve_policy_path};
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_default_policy_path_is_absolute() {
+        let path = default_policy_path();
+        assert!(
+            path.is_absolute(),
+            "default_policy_path should return absolute path, got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn test_default_policy_path_ends_with_expected_parts() {
+        let path = default_policy_path();
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains("examples"),
+            "should contain 'examples': {}",
+            path_str
+        );
+        assert!(
+            path_str.contains("policies"),
+            "should contain 'policies': {}",
+            path_str
+        );
+        assert!(
+            path_str.ends_with("examples/policies/default-secure.yml"),
+            "should end with examples/policies/default-secure.yml, got: {}",
+            path_str
+        );
+    }
+
+    #[test]
+    fn test_default_policy_path_exists() {
+        let path = default_policy_path();
+        assert!(
+            path.exists(),
+            "default policy file should exist at: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn test_resolve_policy_path_none_equals_default() {
+        let result = resolve_policy_path(None);
+        let expected = default_policy_path();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_resolve_policy_path_relative_is_absolute_and_exists() {
+        let result = resolve_policy_path(Some("examples/policies/default-secure.yml"));
+        assert!(
+            result.is_absolute(),
+            "resolved relative path should be absolute: {}",
+            result.display()
+        );
+        assert!(
+            result.exists(),
+            "resolved path should exist: {}",
+            result.display()
+        );
+    }
+
+    #[test]
+    fn test_resolve_policy_path_absolute_unchanged() {
+        let result = resolve_policy_path(Some("/tmp/custom-policy.yml"));
+        assert_eq!(result, PathBuf::from("/tmp/custom-policy.yml"));
+    }
+
+    #[test]
+    fn test_resolve_policy_path_works_when_cwd_is_tmp() {
+        // Save current dir
+        let orig_cwd = std::env::current_dir().unwrap();
+
+        // Change to /tmp (should not affect compile-time workspace root resolution)
+        std::env::set_current_dir("/tmp").unwrap();
+
+        // Both None and relative should still resolve to repo policy
+        let from_none = resolve_policy_path(None);
+        let from_relative = resolve_policy_path(Some("examples/policies/default-secure.yml"));
+
+        // Restore original cwd
+        let _ = std::env::set_current_dir(&orig_cwd);
+
+        // Verify they're still absolute and point to the repo policy (not /tmp/...)
+        assert!(
+            from_none.is_absolute(),
+            "resolve_policy_path(None) should be absolute when cwd=/tmp, got: {}",
+            from_none.display()
+        );
+        assert!(
+            from_none.to_string_lossy().contains("osai-linux"),
+            "resolve_policy_path(None) should still point to repo, got: {}",
+            from_none.display()
+        );
+        assert!(
+            from_relative.is_absolute(),
+            "resolve_policy_path(relative) should be absolute when cwd=/tmp, got: {}",
+            from_relative.display()
+        );
+        assert!(
+            from_relative.to_string_lossy().contains("osai-linux"),
+            "resolve_policy_path(relative) should still point to repo when cwd=/tmp, got: {}",
+            from_relative.display()
+        );
+    }
+}

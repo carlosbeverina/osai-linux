@@ -12,7 +12,7 @@ use osai_agent_core::{
     apply::authorize_plan_preview,
     shared::{
         default_apply_receipts_dir, default_ask_plans_dir, default_ask_receipts_dir,
-        default_chat_receipts_dir, is_loopback_url,
+        default_chat_receipts_dir, is_loopback_url, resolve_policy_path,
     },
 };
 use osai_plan_dsl::OsaiPlan;
@@ -561,10 +561,7 @@ async fn handle_plans_authorize(
         }
     }
 
-    let policy_path = PathBuf::from(
-        req.policy_path
-            .unwrap_or_else(|| "examples/policies/default-secure.yml".to_string()),
-    );
+    let policy_path = resolve_policy_path(req.policy_path.as_deref());
 
     let allowed_roots: Vec<PathBuf> = req
         .allowed_roots
@@ -618,10 +615,7 @@ async fn handle_apply(stream: &mut tokio::net::TcpStream, body: &[u8]) -> anyhow
         .map(PathBuf::from)
         .unwrap_or_else(default_apply_receipts_dir);
 
-    let policy_path = PathBuf::from(
-        req.policy_path
-            .unwrap_or_else(|| "examples/policies/default-secure.yml".to_string()),
-    );
+    let policy_path = resolve_policy_path(req.policy_path.as_deref());
     let plan_path = PathBuf::from(&req.plan_path);
 
     let dry_run = req.dry_run.unwrap_or(true);
@@ -1134,5 +1128,84 @@ mod tests {
         let req: AskRequestV1 = serde_json::from_str(json).unwrap();
         assert_eq!(req.request, "list downloads");
         assert!(req.plans_dir.is_none()); // not provided, will use default
+    }
+
+    #[test]
+    fn test_authorize_request_defaults_policy_path() {
+        let json = r#"{"plan_path": "/plan.yml"}"#;
+        let req: AuthorizeRequest = serde_json::from_str(json).unwrap();
+        assert!(req.policy_path.is_none()); // will use default
+    }
+
+    #[test]
+    fn test_apply_request_defaults_policy_path() {
+        let json = r#"{"plan_path": "/plan.yml"}"#;
+        let req: ApplyRequestV1 = serde_json::from_str(json).unwrap();
+        assert!(req.policy_path.is_none()); // will use default
+    }
+
+    // ========================================================================
+    // Policy path resolution tests
+    // ========================================================================
+
+    #[test]
+    fn test_default_policy_path_is_persistent() {
+        // The default policy path should be absolute and not contain tmp
+        let path = osai_agent_core::default_policy_path();
+        let path_str = path.to_string_lossy();
+        assert!(
+            path.is_absolute(),
+            "default policy path should be absolute: {}",
+            path_str
+        );
+        assert!(
+            !path_str.contains("tmp"),
+            "default policy path should not be in tmp: {}",
+            path_str
+        );
+    }
+
+    #[test]
+    fn test_resolve_policy_path_none_uses_default() {
+        let result = resolve_policy_path(None);
+        let default = osai_agent_core::default_policy_path();
+        assert_eq!(result, default);
+    }
+
+    #[test]
+    fn test_resolve_policy_path_relative_is_absolute() {
+        let result = resolve_policy_path(Some("examples/policies/default-secure.yml"));
+        assert!(
+            result.is_absolute(),
+            "relative policy path should be resolved to absolute: {}",
+            result.display()
+        );
+    }
+
+    #[test]
+    fn test_resolve_policy_path_absolute_unchanged() {
+        let result = resolve_policy_path(Some("/tmp/custom.yml"));
+        assert_eq!(result, std::path::PathBuf::from("/tmp/custom.yml"));
+    }
+
+    #[test]
+    fn test_resolve_policy_path_works_from_different_cwd() {
+        // Save and restore cwd
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir("/tmp").unwrap();
+
+        let result = resolve_policy_path(None);
+        assert!(
+            result.is_absolute(),
+            "should still resolve to absolute path from /tmp: {}",
+            result.display()
+        );
+        assert!(
+            result.to_string_lossy().contains("osai-linux"),
+            "should still resolve to repo path from /tmp: {}",
+            result.display()
+        );
+
+        let _ = std::env::set_current_dir(&orig_cwd);
     }
 }
