@@ -67,7 +67,7 @@ pub struct ChatUsage {
 /// Returns the OSAI workspace root using compile-time CARGO_MANIFEST_DIR.
 /// This is stable regardless of where the binary is run from or what cwd is.
 /// Can be overridden at runtime via OSAI_REPO_ROOT env var.
-fn workspace_root() -> PathBuf {
+pub fn workspace_root() -> PathBuf {
     // Runtime override (for installed/dev scenarios where env var is set explicitly)
     if let Ok(override_path) = std::env::var("OSAI_REPO_ROOT") {
         let p = PathBuf::from(override_path);

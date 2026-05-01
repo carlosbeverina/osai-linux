@@ -66,6 +66,15 @@
     <div id="status-output">Loading...</div>
   </div>
 
+  <!-- Runtime Status Panel -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Runtime Status</span>
+      <button onclick="refreshRuntimeStatus()">Refresh runtime</button>
+    </div>
+    <div id="runtime-status-output">Click refresh to load runtime status.</div>
+  </div>
+
   <!-- Chat Panel -->
   <div class="panel">
     <div class="panel-header">
@@ -208,6 +217,74 @@ async function refreshStatus() {
   } catch (e) {
     el.innerHTML = `<div class="status-fail">Failed to load status: ${e.message}</div>`;
     log('Status refresh failed: ' + e.message, 'error');
+  }
+}
+
+// Runtime Status
+async function refreshRuntimeStatus() {
+  const el = document.getElementById('runtime-status-output');
+  el.innerHTML = 'Loading runtime status...';
+  try {
+    const res = await fetch(API + '/v1/runtime/status');
+    if (!res.ok) {
+      el.innerHTML = '<div class="status-fail">Failed to load runtime status: HTTP ' + res.status + '</div>';
+      log('Runtime status refresh failed: HTTP ' + res.status, 'error');
+      return;
+    }
+    const data = await res.json();
+
+    const components = data.components || {};
+    const systemd = data.systemd || { available: false };
+    const hints = data.hints || [];
+
+    let html = '<div style="margin-bottom:8px;">';
+    html += '<span class="' + (data.overall === 'healthy' ? 'status-ok' : data.overall === 'stopped' ? 'status-fail' : 'status-warn') + '">';
+    html += 'Overall: ' + (data.overall || 'unknown') + '</span> &nbsp;';
+    html += '<span style="color:#8b949e;">Mode: ' + (data.runtime_mode || 'unknown') + '</span>';
+    html += '</div>';
+
+    html += '<table style="width:auto; font-size:11px;">';
+    html += '<tr><th>Component</th><th>Health</th><th>URL</th></tr>';
+    for (const [name, comp] of Object.entries(components)) {
+      const healthClass = comp.healthy ? 'status-ok' : 'status-fail';
+      const reachable = comp.reachable ? 'yes' : 'no';
+      html += '<tr>';
+      html += '<td>' + name + '</td>';
+      html += '<td class="' + healthClass + '">' + (comp.healthy ? 'healthy' : 'unhealthy') + ' (' + reachable + ')</td>';
+      html += '<td style="color:#8b949e;">' + (comp.url || '') + '</td>';
+      html += '</tr>';
+    }
+    html += '</table>';
+
+    if (systemd.available && systemd.services) {
+      html += '<div style="margin-top:8px; font-size:11px; color:#8b949e;">Systemd services:</div>';
+      html += '<table style="width:auto; font-size:11px;">';
+      html += '<tr><th>Service</th><th>Active</th><th>Enabled</th></tr>';
+      for (const [name, svc] of Object.entries(systemd.services)) {
+        const activeClass = svc.active ? 'status-ok' : 'status-fail';
+        html += '<tr>';
+        html += '<td>' + name.replace('.service', '') + '</td>';
+        html += '<td class="' + activeClass + '">' + (svc.active ? 'yes' : 'no') + '</td>';
+        html += '<td>' + (svc.enabled ? 'yes' : 'no') + '</td>';
+        html += '</tr>';
+      }
+      html += '</table>';
+    } else if (!systemd.available) {
+      html += '<div style="margin-top:8px; font-size:11px; color:#8b949e;">Systemd: not available</div>';
+    }
+
+    if (hints.length > 0) {
+      html += '<div style="margin-top:8px; font-size:11px;">Hints:</div>';
+      for (const hint of hints) {
+        html += '<div style="color:#d29922; font-size:11px;">- ' + hint + '</div>';
+      }
+    }
+
+    el.innerHTML = html;
+    log('Runtime status refreshed: overall=' + data.overall + ', mode=' + data.runtime_mode);
+  } catch (e) {
+    el.innerHTML = '<div class="status-fail">Failed to load runtime status: ' + e.message + '</div>';
+    log('Runtime status refresh failed: ' + e.message, 'error');
   }
 }
 

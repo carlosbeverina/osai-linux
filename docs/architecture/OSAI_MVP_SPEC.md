@@ -227,6 +227,7 @@ A local Dev Panel UI is available at `http://127.0.0.1:8090/ui` for validating t
 
 **Dev Panel Capabilities**:
 - Status panel (health, Model Router reachability, capabilities)
+- Runtime Status panel (GET /v1/runtime/status with live component health, systemd state, runtime mode)
 - Chat panel (POST /v1/chat)
 - Ask / Plan generation panel (POST /v1/ask)
 - Plans panel (GET /v1/plans, GET /v1/plans/read)
@@ -270,7 +271,7 @@ A local Dev Panel UI is available at `http://127.0.0.1:8090/ui` for validating t
 
 Core (existing):
 - `GET /health` - Health check with service/version
-- `GET /v1/capabilities` - Returns `{chat, ask, plan_validate, plan_authorize, apply, plans, receipts}: true`
+- `GET /v1/capabilities` - Returns `{chat, ask, plan_validate, plan_authorize, apply, plans, receipts, runtime_status}: true`
 - `POST /v1/chat` - Chat with model router (configurable URL, receipts persisted)
 - `POST /v1/ask` - Generate Plan DSL from natural language (receipts/plans persisted)
 - `POST /v1/plans/validate` - Validate plan YAML/JSON file
@@ -279,6 +280,7 @@ Core (existing):
 
 New UI-ready endpoints:
 - `GET /v1/status` - Local stack/service status with Model Router reachability check
+- `GET /v1/runtime/status` - Unified runtime status with live component health checks (llama.cpp, Model Router, osai-api), systemd service state, runtime mode inference, and remediation hints
 - `GET /v1/plans` - List generated plans (sorted newest first, limit/max 100)
 - `GET /v1/plans/read?path=...` - Read one plan for UI preview
 - `POST /v1/plans/authorize` - Preview plan authorization without executing
@@ -344,6 +346,14 @@ osai-agent tool run --plan <path> --policy <path> --receipts-dir <path> --allowe
 ```bash
 osai-agent doctor [--repo-root <path>] [--model-router-url <url>] [--receipts-dir <path>] [--skip-model-router] [--json]
 ```
+
+### Runtime Command
+
+```bash
+osai-agent runtime status [--json]
+```
+
+Reports unified runtime status: live component health (llama.cpp, Model Router, osai-api), systemd service state, runtime mode inference, paths, and remediation hints. Both `osai-agent runtime status` and `GET /v1/runtime/status` use the same live-check implementation.
 
 ## 5. Security Model v0.1
 
@@ -581,6 +591,34 @@ cargo run -p osai-agent-cli -- doctor
 # JSON output for automation
 cargo run -p osai-agent-cli -- doctor --json --skip-model-router
 ```
+
+### 8.6 Runtime Status
+
+```bash
+# Unified runtime status (same live checks as GET /v1/runtime/status)
+cargo run -p osai-agent-cli -- runtime status
+
+# JSON output for automation
+cargo run -p osai-agent-cli -- runtime status --json
+
+# Via API
+curl http://127.0.0.1:8090/v1/runtime/status | jq .
+```
+
+**Runtime Modes**:
+- `systemd` - Active systemd user services detected
+- `manual` - All components healthy, no active systemd services
+- `partial` - Some components healthy, others down
+- `stopped` - No components reachable
+- `unknown` - Cannot determine state
+
+**Overall Health**:
+- `healthy` - All components reachable and healthy
+- `degraded` - Some components down or degraded
+- `stopped` - No components reachable
+- `unknown` - Cannot determine state
+
+Both CLI and API use the same live-check implementation in `osai-agent-core::runtime::collect_runtime_status_sync()` (CLI) and `osai-agent-core::runtime::collect_runtime_status_async()` (API).
 
 ## 9. MVP Milestones
 

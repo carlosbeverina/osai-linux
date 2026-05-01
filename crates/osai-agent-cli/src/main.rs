@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use osai_agent_core::{
     apply::run_apply as core_run_apply, ask::run_ask as core_run_ask,
-    chat::run_chat as core_run_chat, is_loopback_url, step_to_request,
+    chat::run_chat as core_run_chat, is_loopback_url, runtime as runtime_core, step_to_request,
 };
 use osai_plan_dsl::OsaiPlan;
 use osai_receipt_logger::ReceiptStore;
@@ -63,6 +63,11 @@ enum Commands {
         /// Output machine-readable JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Check OSAI runtime status.
+    Runtime {
+        #[command(subcommand)]
+        action: RuntimeCommands,
     },
     /// Ask the model to generate a safe OSAI plan (does not execute).
     Ask {
@@ -251,6 +256,16 @@ enum ToolCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum RuntimeCommands {
+    /// Show full runtime status as JSON.
+    Status {
+        /// Output machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(clap::ValueEnum, Clone, Default)]
 enum OutputFormat {
     #[default]
@@ -402,6 +417,9 @@ fn main() -> Result<()> {
             skip_model_router,
             json,
         ),
+        Commands::Runtime { action } => match action {
+            RuntimeCommands::Status { json } => run_runtime_status(json),
+        },
         Commands::Ask {
             message,
             model_router_url,
@@ -794,6 +812,52 @@ pub struct DoctorSummary {
     pub ok: usize,
     pub warn: usize,
     pub fail: usize,
+}
+
+fn run_runtime_status(json: bool) -> Result<()> {
+    let status = runtime_core::collect_runtime_status_sync();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status).unwrap());
+    } else {
+        print_runtime_status_human(&status);
+    }
+    Ok(())
+}
+
+fn print_runtime_status_human(status: &runtime_core::RuntimeStatus) {
+    println!("OSAI Runtime Status");
+    println!("Overall: {:?}", status.overall);
+    println!("Mode: {:?}", status.runtime_mode);
+    println!();
+    println!("Components:");
+    for (name, comp) in &status.components {
+        let health = if comp.healthy { "healthy" } else { "unhealthy" };
+        println!("  {:18} {:10} {}", name, health, comp.url);
+        if let Some(err) = &comp.error {
+            println!("    error: {}", err);
+        }
+    }
+    println!();
+    if let Some(ref services) = status.systemd.services {
+        println!("Systemd:");
+        for (name, svc) in services {
+            let state = if svc.active { "active" } else { "inactive" };
+            let enabled = if svc.enabled { "enabled" } else { "disabled" };
+            println!("  {:28} {:10} {:10}", name, state, enabled);
+        }
+    } else if !status.systemd.available {
+        println!("Systemd: not available");
+    }
+    println!();
+    if status.hints.is_empty() {
+        println!("Hints: none");
+    } else {
+        println!("Hints:");
+        for hint in &status.hints {
+            println!("  - {}", hint);
+        }
+    }
 }
 
 fn run_doctor(

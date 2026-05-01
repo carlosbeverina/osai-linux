@@ -5,6 +5,7 @@
 mod errors;
 mod plans;
 mod receipts;
+mod runtime_status;
 mod status;
 
 use anyhow::Result;
@@ -41,6 +42,7 @@ struct CapabilitiesResponse {
     apply: bool,
     plans: bool,
     receipts: bool,
+    runtime_status: bool,
 }
 
 /// Chat API request (v1)
@@ -201,6 +203,7 @@ async fn handle_capabilities(stream: &mut tokio::net::TcpStream) -> anyhow::Resu
         apply: true,
         plans: true,
         receipts: true,
+        runtime_status: true,
     };
     send_json(stream, 200, &resp).await
 }
@@ -806,6 +809,10 @@ async fn route(
         // V1 endpoints
         ("GET", "/v1/status") => handle_status(stream).await?,
         ("GET", "/v1/capabilities") => handle_capabilities(stream).await?,
+        ("GET", "/v1/runtime/status") => {
+            let status = runtime_status::handle_runtime_status().await;
+            send_json(stream, 200, &status).await?;
+        }
         ("GET", "/v1/plans") => handle_plans_list(stream, query).await?,
         ("GET", "/v1/plans/read") => handle_plans_read(stream, query).await?,
         ("GET", "/v1/receipts") => handle_receipts_list(stream, query).await?,
@@ -920,12 +927,14 @@ mod tests {
             apply: true,
             plans: true,
             receipts: true,
+            runtime_status: true,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"chat\":true"));
         assert!(json.contains("\"plan_authorize\":true"));
         assert!(json.contains("\"plans\":true"));
         assert!(json.contains("\"receipts\":true"));
+        assert!(json.contains("\"runtime_status\":true"));
     }
 
     #[test]

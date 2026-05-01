@@ -227,6 +227,45 @@ else
     fail "osai-api /ui returned HTTP $HTTP_CODE (expected 200)"
 fi
 
+# Check 12: osai-api /v1/runtime/status (with retry)
+echo ""
+echo "Check 12: osai-api /v1/runtime/status"
+MAX_ATTEMPTS=5
+ATTEMPT=1
+RUNTIME_STATUS=""
+RUNTIME_CODE="000"
+
+while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
+    # Get status code and body in one call
+    RUNTIME_STATUS=$(curl -s --max-time 10 \
+        -w "\n%{http_code}" \
+        "${OSAI_API_URL}/v1/runtime/status" 2>&1) || true
+
+    # Last line contains HTTP code
+    RUNTIME_CODE=$(echo "$RUNTIME_STATUS" | tail -1)
+    # Everything except last line is the body
+    RUNTIME_BODY=$(echo "$RUNTIME_STATUS" | sed '$d')
+
+    if [[ "$RUNTIME_CODE" == "200" ]]; then
+        break
+    fi
+
+    if [[ $ATTEMPT -lt $MAX_ATTEMPTS ]]; then
+        sleep 1
+    fi
+    ATTEMPT=$((ATTEMPT + 1))
+done
+
+if [[ "$RUNTIME_CODE" == "200" ]]; then
+    if echo "$RUNTIME_BODY" | grep -q '"overall"'; then
+        ok "osai-api /v1/runtime/status returned HTTP 200 with overall status"
+    else
+        fail "osai-api /v1/runtime/status missing 'overall' field: $RUNTIME_BODY"
+    fi
+else
+    fail "osai-api /v1/runtime/status failed after ${MAX_ATTEMPTS} attempts (HTTP $RUNTIME_CODE): $RUNTIME_BODY"
+fi
+
 echo ""
 echo "=== Summary ==="
 if [[ $FAILURES -eq 0 ]]; then
