@@ -3,7 +3,7 @@ Description=OSAI vLLM Local Runtime
 After=network.target
 
 [Service]
-EnvironmentFile=%h/.config/osai/vllm.env
+EnvironmentFile=-%h/.config/osai/vllm.env
 Environment="OSAI_VLLM_BIN=%h/Projects/osai-linux/.local-runtimes/vllm/.venv/bin/vllm"
 Environment="OSAI_VLLM_HOST=127.0.0.1"
 Environment="OSAI_VLLM_PORT=8091"

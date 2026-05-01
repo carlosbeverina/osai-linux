@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENABLE_NOW=false
 ENABLE_VLLM=false
 ENABLE_LLAMACPP=false
+ENABLE_OSAI_API=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -23,13 +24,18 @@ while [[ $# -gt 0 ]]; do
             ENABLE_LLAMACPP=true
             shift
             ;;
+        --enable-osai-api)
+            ENABLE_OSAI_API=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--enable-now] [--enable-vllm] [--enable-llamacpp]"
+            echo "Usage: $0 [--enable-now] [--enable-vllm] [--enable-llamacpp] [--enable-osai-api]"
             echo ""
             echo "Options:"
             echo "  --enable-now        Enable and start the service immediately"
             echo "  --enable-vllm       Also enable vLLM service (only with --enable-now)"
             echo "  --enable-llamacpp   Also enable llama.cpp service (only with --enable-now)"
+            echo "  --enable-osai-api   Also enable osai-api service (only with --enable-now)"
             echo ""
             echo "This script installs systemd user units from:"
             echo "  ${REPO_ROOT}/systemd/user/"
@@ -54,6 +60,11 @@ if [[ "$ENABLE_LLAMACPP" == "true" ]] && [[ "$ENABLE_NOW" != "true" ]]; then
     exit 1
 fi
 
+if [[ "$ENABLE_OSAI_API" == "true" ]] && [[ "$ENABLE_NOW" != "true" ]]; then
+    echo "Error: --enable-osai-api requires --enable-now"
+    exit 1
+fi
+
 USER_SERVICE_DIR="${HOME}/.config/systemd/user"
 SYSTEMD_SOURCE="${REPO_ROOT}/systemd/user"
 
@@ -62,6 +73,51 @@ echo ""
 
 # Create user systemd directory if it doesn't exist
 mkdir -p "$USER_SERVICE_DIR"
+mkdir -p "${HOME}/.config/osai"
+mkdir -p "${HOME}/.local/share/osai/receipts/model-router"
+mkdir -p "${HOME}/.local/share/osai/receipts/llamacpp"
+
+# Create llama.cpp env file (paths are expanded at install time, not at runtime)
+LLAMACPP_ENV="${HOME}/.config/osai/llamacpp.env"
+cat > "$LLAMACPP_ENV" << ENVFILE
+OSAI_LLAMACPP_BIN=${REPO_ROOT}/.local-runtimes/llama.cpp/build/bin/llama-server
+OSAI_LLAMACPP_HOST=127.0.0.1
+OSAI_LLAMACPP_PORT=8092
+OSAI_LLAMACPP_MODEL=gemma-4-E2B-it-Q8_0.gguf
+OSAI_LLAMACPP_MODEL_PATH=${REPO_ROOT}/.local-models/llamacpp/gemma-4-e2b-it/gemma-4-E2B-it-Q8_0.gguf
+OSAI_LLAMACPP_CTX_SIZE=4096
+OSAI_LLAMACPP_GPU_LAYERS=999
+OSAI_LLAMACPP_API_KEY=osai-local-dev-token
+OSAI_LLAMACPP_EXTRA_ARGS=
+ENVFILE
+
+# Create model-router env file
+MODEL_ROUTER_ENV="${HOME}/.config/osai/model-router.env"
+cat > "$MODEL_ROUTER_ENV" << ENVFILE
+OSAI_LOCAL_PROVIDER=llamacpp
+OSAI_LOCAL_MOCK=false
+OSAI_LLAMACPP_BASE_URL=http://127.0.0.1:8092/v1
+OSAI_LLAMACPP_API_KEY=osai-local-dev-token
+OSAI_LLAMACPP_MODEL=gemma-4-E2B-it-Q8_0.gguf
+OSAI_RECEIPTS_DIR=${HOME}/.local/share/osai/receipts/model-router
+ENVFILE
+
+# Create vllm env file (placeholder)
+VLLM_ENV="${HOME}/.config/osai/vllm.env"
+cat > "$VLLM_ENV" << ENVFILE
+OSAI_VLLM_BIN=${REPO_ROOT}/.local-runtimes/vllm/.venv/bin/vllm
+OSAI_VLLM_HOST=127.0.0.1
+OSAI_VLLM_PORT=8091
+OSAI_VLLM_MODEL=gemma-local
+OSAI_VLLM_API_KEY=osai-local-dev-token
+OSAI_VLLM_EXTRA_ARGS=
+ENVFILE
+
+echo "Created env files:"
+echo "  ${LLAMACPP_ENV}"
+echo "  ${MODEL_ROUTER_ENV}"
+echo "  ${VLLM_ENV}"
+echo ""
 
 # Copy service files
 for service_file in "${SYSTEMD_SOURCE}"/*.service; do
@@ -81,6 +137,7 @@ echo "=== Installation complete ==="
 echo ""
 echo "Installed services:"
 echo "  - osai-model-router.service (API gateway)"
+echo "  - osai-api.service (local agent API, Dev Panel UI)"
 echo "  - osai-vllm.service (vLLM local runtime, optional)"
 echo "  - osai-llamacpp.service (llama.cpp local runtime, optional)"
 echo ""
@@ -88,11 +145,37 @@ echo "Next steps:"
 echo ""
 
 if [[ "$ENABLE_NOW" == "true" ]]; then
-    echo "Enabling and starting osai-model-router.service..."
+    echo "Enabling services in dependency order..."
+
+    # Start llama.cpp first (runtime dependency for model-router)
+    if [[ "$ENABLE_LLAMACPP" == "true" ]]; then
+        echo ""
+        echo "[1/3] Enabling and starting osai-llamacpp.service..."
+        systemctl --user enable --now osai-llamacpp.service
+        echo ""
+        echo "llama.cpp service status:"
+        systemctl --user status osai-llamacpp.service --no-pager -l
+        # Give llama.cpp time to bind the port
+        sleep 2
+    fi
+
+    # Then model-router (depends on llama.cpp via OSAI_LLAMACPP_BASE_URL)
+    echo ""
+    echo "[2/3] Enabling and starting osai-model-router.service..."
     systemctl --user enable --now osai-model-router.service
     echo ""
-    echo "Service status:"
-    systemctl --user status osai-model-router.service
+    echo "Model Router status:"
+    systemctl --user status osai-model-router.service --no-pager -l
+
+    # Then osai-api (depends on model-router)
+    if [[ "$ENABLE_OSAI_API" == "true" ]]; then
+        echo ""
+        echo "[3/3] Enabling and starting osai-api.service..."
+        systemctl --user enable --now osai-api.service
+        echo ""
+        echo "osai-api service status:"
+        systemctl --user status osai-api.service --no-pager -l
+    fi
 
     if [[ "$ENABLE_VLLM" == "true" ]]; then
         echo ""
@@ -100,16 +183,7 @@ if [[ "$ENABLE_NOW" == "true" ]]; then
         systemctl --user enable --now osai-vllm.service
         echo ""
         echo "vLLM service status:"
-        systemctl --user status osai-vllm.service
-    fi
-
-    if [[ "$ENABLE_LLAMACPP" == "true" ]]; then
-        echo ""
-        echo "Enabling and starting osai-llamacpp.service..."
-        systemctl --user enable --now osai-llamacpp.service
-        echo ""
-        echo "llama.cpp service status:"
-        systemctl --user status osai-llamacpp.service
+        systemctl --user status osai-vllm.service --no-pager -l
     fi
 else
     echo "To start osai-model-router.service manually:"
@@ -120,6 +194,11 @@ else
     echo ""
     echo "To check status:"
     echo "  systemctl --user status osai-model-router.service"
+    echo ""
+    echo "osai-api (Dev Panel at http://127.0.0.1:8090/ui):"
+    echo "  systemctl --user start osai-api.service"
+    echo "  systemctl --user status osai-api.service"
+    echo "  journalctl --user -u osai-api -f"
     echo ""
     echo "To view logs:"
     echo "  journalctl --user -u osai-model-router -f"

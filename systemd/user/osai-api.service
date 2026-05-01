@@ -1,0 +1,15 @@
+[Unit]
+Description=OSAI API Server
+After=network.target osai-model-router.service
+Wants=osai-model-router.service
+
+[Service]
+# Set repo root so policy/plans resolve correctly regardless of cwd
+Environment="OSAI_REPO_ROOT=%h/Projects/osai-linux"
+# Bind to loopback only — no external interface exposure
+ExecStart=%h/Projects/osai-linux/target/debug/osai-api
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -3,7 +3,7 @@ Description=OSAI Model Router
 After=network.target
 
 [Service]
-EnvironmentFile=%h/.config/osai/model-router.env
+EnvironmentFile=-%h/.config/osai/model-router.env
 Environment="OSAI_MODEL_ROUTER_MOCK_CLOUD=true"
 Environment="OSAI_RECEIPTS_DIR=%h/.local/share/osai/receipts/model-router"
 ExecStart=%h/Projects/osai-linux/services/model-router/.venv/bin/uvicorn osai_model_router.main:app --host 127.0.0.1 --port 8088

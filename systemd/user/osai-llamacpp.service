@@ -3,7 +3,7 @@ Description=OSAI llama.cpp Local Runtime
 After=network.target
 
 [Service]
-EnvironmentFile=%h/.config/osai/llamacpp.env
+EnvironmentFile=-%h/.config/osai/llamacpp.env
 Environment="OSAI_LLAMACPP_BIN=%h/Projects/osai-linux/.local-runtimes/llama.cpp/build/bin/llama-server"
 Environment="OSAI_LLAMACPP_HOST=127.0.0.1"
 Environment="OSAI_LLAMACPP_PORT=8092"
