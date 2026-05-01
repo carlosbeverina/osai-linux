@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OSAI API Dev Panel</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: monospace; font-size: 13px; background: #0d1117; color: #c9d1d9; padding: 16px; }
+  h1 { font-size: 18px; color: #58a6ff; margin-bottom: 4px; }
+  h2 { font-size: 14px; color: #8b949e; margin: 16px 0 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
+  .panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+  .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .panel-title { font-weight: bold; color: #c9d1d9; }
+  button { background: #238636; color: #fff; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-family: monospace; font-size: 12px; }
+  button:hover { background: #2ea043; }
+  button:disabled { background: #484f58; cursor: not-allowed; }
+  button.danger { background: #da3633; }
+  button.danger:hover { background: #f85149; }
+  button.secondary { background: #30363d; }
+  button.secondary:hover { background: #484f58; }
+  textarea, input[type="text"] { width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 8px; font-family: monospace; font-size: 12px; resize: vertical; }
+  input[type="text"] { resize: none; }
+  .output { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 8px; min-height: 60px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; font-size: 12px; margin-top: 8px; }
+  .output.error { border-color: #f85149; color: #f85149; }
+  .output.success { border-color: #2ea043; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 11px; }
+  th, td { border: 1px solid #30363d; padding: 4px 8px; text-align: left; }
+  th { background: #21262d; color: #8b949e; }
+  tr:nth-child(even) { background: #161b22; }
+  .status-ok { color: #2ea043; }
+  .status-fail { color: #f85149; }
+  .status-warn { color: #d29922; }
+  .item { background: #0d1117; border: 1px solid #21262d; border-radius: 4px; padding: 8px; margin-bottom: 4px; cursor: pointer; }
+  .item:hover { border-color: #30363d; }
+  .item.selected { border-color: #58a6ff; background: #1c2128; }
+  .item-title { color: #c9d1d9; font-weight: bold; }
+  .item-meta { color: #8b949e; font-size: 11px; margin-top: 2px; }
+  .item.valid { border-left: 3px solid #2ea043; }
+  .item.invalid { border-left: 3px solid #f85149; }
+  .log-entry { font-size: 11px; padding: 4px 0; border-bottom: 1px solid #21262d; }
+  .log-time { color: #8b949e; }
+  .log-error { color: #f85149; }
+  .log-success { color: #2ea043; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .full { grid-column: 1 / -1; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  input[type="checkbox"] { width: 16px; height: 16px; }
+  .danger-zone { border: 1px solid #f85149; background: #1a1010; }
+  .danger-zone button:disabled { background: #484f58; }
+  pre { white-space: pre-wrap; word-break: break-all; font-size: 11px; }
+  .section-label { color: #8b949e; font-size: 11px; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<h1>OSAI API Dev Panel</h1>
+<div id="activity-log" style="margin-bottom:16px; font-size:11px; max-height:80px; overflow-y:auto;"></div>
+
+<div class="grid">
+  <!-- Status Panel -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Status</span>
+      <button onclick="refreshStatus()">Refresh status</button>
+    </div>
+    <div id="status-output">Loading...</div>
+  </div>
+
+  <!-- Chat Panel -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Chat</span>
+      <button onclick="sendChat()">Send</button>
+    </div>
+    <textarea id="chat-message" rows="3" placeholder="Enter message...">Reply with exactly: OSAI UI chat OK</textarea>
+    <button class="secondary" onclick="document.getElementById('chat-message').value='Reply with exactly: OSAI UI chat OK'" style="margin-top:4px;">Use default</button>
+    <div id="chat-output" class="output">No response yet.</div>
+  </div>
+
+  <!-- Ask Panel -->
+  <div class="panel full">
+    <div class="panel-header">
+      <span class="panel-title">Ask / Generate Plan</span>
+      <button onclick="sendAsk()">Generate plan</button>
+    </div>
+    <textarea id="ask-request" rows="2" placeholder="Natural language request...">Create a safe plan to list my Downloads folder</textarea>
+    <button class="secondary" onclick="document.getElementById('ask-request').value='Create a safe plan to list my Downloads folder'" style="margin-top:4px;">Use default</button>
+    <div id="ask-output" class="output">No response yet.</div>
+  </div>
+
+  <!-- Plans Panel -->
+  <div class="panel full">
+    <div class="panel-header">
+      <span class="panel-title">Plans</span>
+      <button onclick="refreshPlans()">Refresh plans</button>
+    </div>
+    <div id="plans-list" style="max-height:160px; overflow-y:auto; margin-bottom:8px;">No plans loaded.</div>
+    <div id="plan-detail" style="display:none;">
+      <div class="section-label">Selected plan:</div>
+      <div id="plan-path" style="color:#58a6ff; font-size:11px; margin-bottom:4px;"></div>
+      <div id="plan-preview" style="max-height:120px; overflow-y:auto; background:#0d1117; border:1px solid #30363d; border-radius:4px; padding:8px;">
+        <pre id="plan-content">Loading...</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Validate / Authorize / Apply Panel -->
+  <div class="panel full">
+    <div class="panel-header">
+      <span class="panel-title">Validate / Authorize / Apply</span>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+      <button onclick="validatePlan()">Validate selected plan</button>
+      <button onclick="authorizePlan()">Authorize selected plan</button>
+      <button class="secondary" onclick="applyPlan(true)">Dry-run selected plan</button>
+    </div>
+    <div id="validate-output" class="output" style="display:none;"></div>
+    <div id="authorize-output" class="output" style="display:none;"></div>
+    <div id="apply-output" class="output" style="display:none;"></div>
+    <div style="margin-top:8px;">
+      <label class="section-label">Allowed roots (comma-separated):</label>
+      <input type="text" id="allowed-roots" placeholder="/home/user/Downloads" value="/home/user/Downloads">
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="approve-all">
+      <label for="approve-all">Approve all steps</label>
+    </div>
+    <div>
+      <label class="section-label">Approve step IDs (comma-separated):</label>
+      <input type="text" id="approve-ids" placeholder="step-1,step-2">
+    </div>
+
+    <!-- Danger zone for real apply -->
+    <div class="danger-zone" style="margin-top:12px; padding:12px; border-radius:4px;">
+      <div class="panel-title" style="color:#f85149; margin-bottom:8px;">Danger Zone - Real Execution</div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="understand-danger">
+        <label for="understand-danger">I understand this may execute actions</label>
+      </div>
+      <div id="authorized-indicator" style="color:#8b949e; font-size:11px; margin-bottom:8px;">Authorization status: unknown</div>
+      <button id="real-apply-btn" class="danger" onclick="applyPlan(false)" disabled>Run selected plan (REAL)</button>
+    </div>
+  </div>
+
+  <!-- Receipts Panel -->
+  <div class="panel full">
+    <div class="panel-header">
+      <span class="panel-title">Receipts</span>
+      <button onclick="refreshReceipts()">Refresh receipts</button>
+    </div>
+    <div style="color:#8b949e; font-size:11px; margin-bottom:8px; font-style:italic;">
+      Receipts should not include full prompts or secrets.
+    </div>
+    <div id="receipts-list" style="max-height:140px; overflow-y:auto; margin-bottom:8px;">No receipts loaded.</div>
+    <div id="receipt-detail" style="display:none;">
+      <div class="section-label">Receipt content:</div>
+      <pre id="receipt-content" style="max-height:200px; overflow-y:auto; background:#0d1117; border:1px solid #30363d; border-radius:4px; padding:8px;"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = 'http://127.0.0.1:8090';
+let state = {
+  selectedPlan: null,
+  authorizedPlan: null,
+  plans: [],
+  receipts: []
+};
+
+// Activity log
+function log(msg, type='info') {
+  const el = document.getElementById('activity-log');
+  const time = new Date().toLocaleTimeString();
+  const cls = type === 'error' ? 'log-error' : type === 'success' ? 'log-success' : '';
+  el.innerHTML = `<div class="log-entry ${cls}"><span class="log-time">[${time}]</span> ${msg}</div>` + el.innerHTML;
+  if (el.children.length > 50) el.removeChild(el.lastChild);
+}
+
+function showError(elId, msg) {
+  const el = document.getElementById(elId);
+  el.textContent = 'Error: ' + msg;
+  el.className = 'output error';
+}
+
+// Status
+async function refreshStatus() {
+  const el = document.getElementById('status-output');
+  el.innerHTML = 'Loading...';
+  try {
+    const [health, status, caps] = await Promise.all([
+      fetch(API + '/health').then(r => r.json()).catch(() => null),
+      fetch(API + '/v1/status').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(API + '/v1/capabilities').then(r => r.ok ? r.json() : null).catch(() => null)
+    ]);
+
+    const healthOk = health && health.ok;
+    const routerReachable = status && status.model_router && status.model_router.reachable;
+    const modelStatus = status ? status.models_status : null;
+
+    el.innerHTML = `
+      <div class="${healthOk ? 'status-ok' : 'status-fail'}">osai-api health: ${healthOk ? 'OK' : 'FAIL'}</div>
+      <div class="${routerReachable ? 'status-ok' : 'status-fail'}">Model Router reachable: ${routerReachable ? 'true' : 'false'}</div>
+      ${modelStatus ? `<div class="status-warn">Model: ${JSON.stringify(modelStatus)}</div>` : ''}
+      ${caps ? `<div>Capabilities: chat=${caps.chat}, ask=${caps.ask}, plan_authorize=${caps.plan_authorize}, apply=${caps.apply}, plans=${caps.plans}, receipts=${caps.receipts}</div>` : '<div class="status-fail">Capabilities: unavailable</div>'}
+    `;
+    log('Status refreshed: model_router.reachable=' + String(routerReachable));
+  } catch (e) {
+    el.innerHTML = `<div class="status-fail">Failed to load status: ${e.message}</div>`;
+    log('Status refresh failed: ' + e.message, 'error');
+  }
+}
+
+// Chat
+async function sendChat() {
+  const msg = document.getElementById('chat-message').value;
+  const out = document.getElementById('chat-output');
+  out.textContent = 'Sending...';
+  out.className = 'output';
+  try {
+    const res = await fetch(API + '/v1/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg })
+    });
+    const data = await res.json();
+    if (data.status === 'success' && data.content) {
+      out.textContent = data.content;
+      out.className = 'output success';
+      log('Chat sent, response received');
+    } else {
+      out.textContent = JSON.stringify(data, null, 2);
+      out.className = 'output error';
+      log('Chat returned error: ' + (data.error || data.status), 'error');
+    }
+  } catch (e) {
+    out.textContent = 'Request failed: ' + e.message;
+    out.className = 'output error';
+    log('Chat request failed: ' + e.message, 'error');
+  }
+}
+
+// Ask
+async function sendAsk() {
+  const req = document.getElementById('ask-request').value;
+  const out = document.getElementById('ask-output');
+  out.textContent = 'Generating...';
+  out.className = 'output';
+  try {
+    const res = await fetch(API + '/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request: req })
+    });
+    const data = await res.json();
+    if (data.status === 'success' && data.output_path) {
+      out.textContent = `Status: ${data.status}\nOutput: ${data.output_path}\nValidation: ${data.validation}`;
+      out.className = 'output success';
+      state.selectedPlan = data.output_path;
+      state.authorizedPlan = null;
+      updateAuthorizedIndicator();
+      log('Plan generated: ' + data.output_path);
+      refreshPlans();
+    } else {
+      out.textContent = JSON.stringify(data, null, 2);
+      out.className = 'output error';
+      log('Plan generation failed: ' + (data.error || data.status), 'error');
+    }
+  } catch (e) {
+    out.textContent = 'Request failed: ' + e.message;
+    out.className = 'output error';
+    log('Ask request failed: ' + e.message, 'error');
+  }
+}
+
+// Plans
+async function refreshPlans() {
+  const el = document.getElementById('plans-list');
+  el.innerHTML = 'Loading...';
+  try {
+    const res = await fetch(API + '/v1/plans?limit=20');
+    const data = await res.json();
+    if (data.ok) {
+      state.plans = data.plans || [];
+      if (state.plans.length === 0) {
+        el.innerHTML = 'No plans found.';
+        return;
+      }
+      el.innerHTML = state.plans.map(p => `
+        <div class="item ${p.valid ? 'valid' : 'invalid'} ${state.selectedPlan && state.selectedPlan.endsWith(p.filename) ? 'selected' : ''}"
+             onclick="selectPlan('${p.path.replace(/\\/g, '\\\\')}')">
+          <div class="item-title">${p.title || p.filename}</div>
+          <div class="item-meta">${p.filename} | risk: ${p.risk} | approval: ${p.approval} | steps: ${p.steps} | ${p.valid ? 'valid' : 'error: ' + p.error}</div>
+        </div>
+      `).join('');
+      log('Plans refreshed: ' + state.plans.length + ' found');
+    } else {
+      el.innerHTML = 'Failed to load plans.';
+      log('Plans load failed', 'error');
+    }
+  } catch (e) {
+    el.innerHTML = 'Request failed: ' + e.message;
+    log('Plans request failed: ' + e.message, 'error');
+  }
+}
+
+async function selectPlan(path) {
+  state.selectedPlan = path;
+  state.authorizedPlan = null;
+  updateAuthorizedIndicator();
+
+  document.getElementById('plan-detail').style.display = 'block';
+  document.getElementById('plan-path').textContent = path;
+  document.getElementById('plan-content').textContent = 'Loading...';
+
+  try {
+    const encoded = encodeURIComponent(path);
+    const res = await fetch(API + '/v1/plans/read?path=' + encoded);
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById('plan-content').textContent = data.raw;
+      log('Plan selected: ' + path);
+    } else {
+      document.getElementById('plan-content').textContent = 'Error: ' + data.error;
+      log('Plan read failed: ' + data.error, 'error');
+    }
+  } catch (e) {
+    document.getElementById('plan-content').textContent = 'Request failed: ' + e.message;
+    log('Plan read failed: ' + e.message, 'error');
+  }
+
+  // Update selection UI
+  document.querySelectorAll('#plans-list .item').forEach(el => {
+    el.classList.toggle('selected', el.onclick.toString().includes(path.replace(/\\/g, '\\\\')));
+  });
+}
+
+function updateAuthorizedIndicator() {
+  const el = document.getElementById('authorized-indicator');
+  const btn = document.getElementById('real-apply-btn');
+  if (state.authorizedPlan === state.selectedPlan) {
+    el.textContent = 'Authorization status: authorized in this session';
+    el.style.color = '#2ea043';
+    btn.disabled = !document.getElementById('understand-danger').checked;
+  } else {
+    el.textContent = 'Authorization status: not authorized in this session';
+    el.style.color = '#8b949e';
+    btn.disabled = true;
+  }
+}
+
+document.getElementById('understand-danger').addEventListener('change', function() {
+  updateAuthorizedIndicator();
+});
+
+// Validate
+async function validatePlan() {
+  if (!state.selectedPlan) {
+    showError('validate-output', 'No plan selected');
+    return;
+  }
+  const el = document.getElementById('validate-output');
+  el.style.display = 'block';
+  el.textContent = 'Validating...';
+  el.className = 'output';
+  try {
+    const res = await fetch(API + '/v1/plans/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan_path: state.selectedPlan })
+    });
+    const data = await res.json();
+    el.textContent = `ok: ${data.ok}, valid: ${data.valid}${data.error ? '\nerror: ' + data.error : ''}`;
+    el.className = data.valid ? 'output success' : 'output error';
+    log('Plan validated: ' + data.valid);
+  } catch (e) {
+    el.textContent = 'Request failed: ' + e.message;
+    el.className = 'output error';
+    log('Validate failed: ' + e.message, 'error');
+  }
+}
+
+// Authorize
+async function authorizePlan() {
+  if (!state.selectedPlan) {
+    showError('authorize-output', 'No plan selected');
+    return;
+  }
+  const el = document.getElementById('authorize-output');
+  el.style.display = 'block';
+  el.textContent = 'Authorizing...';
+  el.className = 'output';
+  try {
+    const approveAll = document.getElementById('approve-all').checked;
+    const approveIds = document.getElementById('approve-ids').value.split(',').map(s => s.trim()).filter(Boolean);
+    const allowedRoots = document.getElementById('allowed-roots').value.split(',').map(s => s.trim()).filter(Boolean);
+
+    const res = await fetch(API + '/v1/plans/authorize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        plan_path: state.selectedPlan,
+        allowed_roots: allowedRoots,
+        approve: approveIds,
+        approve_all: approveAll
+      })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const rows = data.steps.map(s =>
+        `${s.id} | ${s.action} | allowed:${s.allowed} | approval_required:${s.approval_required} | mode:${s.mode} | ${s.reason}`
+      ).join('\n');
+      el.textContent = `Summary: allowed=${data.summary.allowed}, denied=${data.summary.denied}, approval_required=${data.summary.approval_required}\n\nSteps:\n${rows}`;
+      el.className = 'output success';
+      state.authorizedPlan = state.selectedPlan;
+      updateAuthorizedIndicator();
+      log('Plan authorized: ' + state.selectedPlan);
+    } else {
+      el.textContent = JSON.stringify(data, null, 2);
+      el.className = 'output error';
+      log('Authorize failed: ' + (data.error || 'unknown'), 'error');
+    }
+  } catch (e) {
+    el.textContent = 'Request failed: ' + e.message;
+    el.className = 'output error';
+    log('Authorize failed: ' + e.message, 'error');
+  }
+}
+
+// Apply
+async function applyPlan(dryRun) {
+  if (!state.selectedPlan) {
+    showError('apply-output', 'No plan selected');
+    return;
+  }
+  if (!dryRun && state.authorizedPlan !== state.selectedPlan) {
+    showError('apply-output', 'Plan must be authorized before real execution');
+    return;
+  }
+  if (!dryRun && !confirm('Execute plan for real? This cannot be undone.')) {
+    return;
+  }
+
+  const el = document.getElementById('apply-output');
+  el.style.display = 'block';
+  el.textContent = dryRun ? 'Running dry-run...' : 'Executing for real...';
+  el.className = 'output';
+  try {
+    const allowedRoots = document.getElementById('allowed-roots').value.split(',').map(s => s.trim()).filter(Boolean);
+
+    const res = await fetch(API + '/v1/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        plan_path: state.selectedPlan,
+        allowed_roots: allowedRoots,
+        dry_run: dryRun
+      })
+    });
+    const data = await res.json();
+    el.textContent = `status: ${data.status}\nexecuted: ${data.executed}\nskipped: ${data.skipped}\ndenied: ${data.denied}\napproval_required: ${data.approval_required}\nfailed: ${data.failed}${data.error ? '\nerror: ' + data.error : ''}${data.approved_steps && data.approved_steps.length ? '\napproved_steps: ' + data.approved_steps.join(', ') : ''}`;
+    el.className = data.status === 'success' ? 'output success' : 'output error';
+    log(`Apply ${dryRun ? 'dry-run' : 'real'} completed: ${data.status}`);
+  } catch (e) {
+    el.textContent = 'Request failed: ' + e.message;
+    el.className = 'output error';
+    log('Apply failed: ' + e.message, 'error');
+  }
+}
+
+// Receipts
+async function refreshReceipts() {
+  const el = document.getElementById('receipts-list');
+  el.innerHTML = 'Loading...';
+  try {
+    const res = await fetch(API + '/v1/receipts?limit=20');
+    const data = await res.json();
+    if (data.ok) {
+      state.receipts = data.receipts || [];
+      if (state.receipts.length === 0) {
+        el.innerHTML = 'No receipts found.';
+        return;
+      }
+      el.innerHTML = state.receipts.map(r => `
+        <div class="item" onclick="selectReceipt('${r.path.replace(/\\/g, '\\\\')}')">
+          <div class="item-title">${r.tool || r.action || 'receipt'}</div>
+          <div class="item-meta">${r.id || r.receipt_id || r.path} | status: ${r.status} | ${r.timestamp ? new Date(r.timestamp * 1000).toLocaleString() : ''}</div>
+        </div>
+      `).join('');
+      log('Receipts refreshed: ' + state.receipts.length + ' found');
+    } else {
+      el.innerHTML = 'Failed to load receipts.';
+      log('Receipts load failed', 'error');
+    }
+  } catch (e) {
+    el.innerHTML = 'Request failed: ' + e.message;
+    log('Receipts request failed: ' + e.message, 'error');
+  }
+}
+
+async function selectReceipt(path) {
+  const el = document.getElementById('receipt-detail');
+  const content = document.getElementById('receipt-content');
+  el.style.display = 'block';
+  content.textContent = 'Loading...';
+  try {
+    const encoded = encodeURIComponent(path);
+    const res = await fetch(API + '/v1/receipts/read?path=' + encoded);
+    const data = await res.json();
+    if (data.ok) {
+      content.textContent = JSON.stringify(data.receipt, null, 2);
+      log('Receipt selected: ' + path);
+    } else {
+      content.textContent = 'Error: ' + data.error;
+      log('Receipt read failed: ' + data.error, 'error');
+    }
+  } catch (e) {
+    content.textContent = 'Request failed: ' + e.message;
+    log('Receipt read failed: ' + e.message, 'error');
+  }
+}
+
+// Init
+refreshStatus();
+refreshPlans();
+refreshReceipts();
+</script>
+</body>
+</html>

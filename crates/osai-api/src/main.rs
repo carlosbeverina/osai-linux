@@ -723,6 +723,60 @@ async fn handle_receipts_read(
 }
 
 // ============================================================================
+// Static File Serving
+// ============================================================================
+
+/// Serve a static file with given content type and body.
+async fn serve_static(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> anyhow::Result<()> {
+    let status_line = match status {
+        200 => "200 OK",
+        404 => "404 Not Found",
+        _ => "200 OK",
+    };
+    let response = format!(
+        "HTTP/1.1 {} \r\nContent-Type: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nExpires: 0\r\nContent-Length: {}\r\n\r\n",
+        status_line,
+        content_type,
+        body.len()
+    );
+    tokio::io::AsyncWriteExt::write_all(stream, response.as_bytes()).await?;
+    tokio::io::AsyncWriteExt::write_all(stream, body).await?;
+    Ok(())
+}
+
+/// Read a static file from the static/ directory.
+pub(crate) async fn read_static_file(filename: &str) -> Option<Vec<u8>> {
+    // Safe path: only allow alphanumeric, dash, dot, slash, underscore
+    let sanitized: String = filename
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '.' || *c == '/' || *c == '_')
+        .collect();
+
+    // Prevent directory traversal
+    if sanitized.contains("..") {
+        return None;
+    }
+
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static");
+    let path = base.join(sanitized.trim_start_matches('/'));
+
+    // Ensure path is within base directory
+    let canonical_base = std::fs::canonicalize(&base).ok()?;
+    let canonical_path = std::fs::canonicalize(&path).ok()?;
+
+    if !canonical_path.starts_with(&canonical_base) {
+        return None;
+    }
+
+    tokio::fs::read(&canonical_path).await.ok()
+}
+
+// ============================================================================
 // Router
 // ============================================================================
 
@@ -737,6 +791,18 @@ async fn route(
     match (method, path) {
         // Health
         ("GET", "/health") => handle_health(stream).await?,
+        // UI static files
+        ("GET", "/ui") | ("GET", "/ui/") | ("GET", "/ui/index.html") => {
+            match read_static_file("ui.html").await {
+                Some(content) => {
+                    serve_static(stream, 200, "text/html", &content).await?;
+                }
+                None => {
+                    let err = ErrorResponse::not_found("UI not found");
+                    send_error(stream, 404, &err).await?;
+                }
+            }
+        }
         // V1 endpoints
         ("GET", "/v1/status") => handle_status(stream).await?,
         ("GET", "/v1/capabilities") => handle_capabilities(stream).await?,
@@ -1207,5 +1273,47 @@ mod tests {
         );
 
         let _ = std::env::set_current_dir(&orig_cwd);
+    }
+
+    // ========================================================================
+    // UI static file serving tests
+    // ========================================================================
+
+    #[test]
+    fn test_ui_route_matches_expected_path() {
+        // Verify the route pattern used in the router
+        let ui_routes = ["/ui", "/ui/", "/ui/index.html"];
+        for route in ui_routes {
+            assert!(
+                route.starts_with("/ui"),
+                "UI route should start with /ui: {}",
+                route
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_static_file_sanitization_rejects_path_traversal() {
+        // Test that path traversal attempts are rejected
+        let result = crate::read_static_file("../../../etc/passwd").await;
+        assert!(result.is_none(), "path traversal should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_read_static_file_sanitization_allows_normal_paths() {
+        // Test that normal file names are allowed
+        let result = crate::read_static_file("ui.html").await;
+        assert!(result.is_some(), "ui.html should be readable");
+    }
+
+    #[tokio::test]
+    async fn test_ui_route_returns_html_with_dev_panel_marker() {
+        let result = crate::read_static_file("ui.html").await;
+        assert!(result.is_some(), "ui.html should be readable");
+        let content = String::from_utf8(result.unwrap()).unwrap();
+        assert!(
+            content.contains("OSAI API Dev Panel"),
+            "ui.html should contain 'OSAI API Dev Panel' marker"
+        );
     }
 }

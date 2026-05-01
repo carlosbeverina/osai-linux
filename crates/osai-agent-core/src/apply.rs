@@ -63,6 +63,7 @@ pub struct AuthorizeSummary {
 
 /// Checks if a path is within any of the allowed roots.
 /// Expands ~ and resolves relative paths before comparison.
+/// Does NOT require the path to exist — uses prefix comparison when canonicalize fails.
 fn is_path_in_allowed_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {
     if allowed_roots.is_empty() {
         return true; // No restriction
@@ -79,10 +80,10 @@ fn is_path_in_allowed_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {
         path.to_path_buf()
     };
 
-    let canonical_path = match std::fs::canonicalize(&expanded_path) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
+    // Try canonicalize first (resolves symlinks, normalizes path). If it fails because
+    // the path doesn't exist yet, fall back to prefix-based comparison.
+    let path_is_dir = std::path::Path::new(&expanded_path).exists();
+    let canonical_path = std::fs::canonicalize(&expanded_path).ok();
 
     for root in allowed_roots {
         let root_str = root.to_string_lossy();
@@ -96,17 +97,99 @@ fn is_path_in_allowed_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {
             root.clone()
         };
 
+        // Canonicalize the root (root should exist as it's provided by caller)
         let canonical_root = match std::fs::canonicalize(&expanded_root) {
             Ok(p) => p,
             Err(_) => continue,
         };
 
-        if canonical_path.starts_with(&canonical_root) {
+        // If we have a canonical path (path exists), do precise comparison
+        if let Some(cp) = &canonical_path {
+            if cp.starts_with(&canonical_root) {
+                return true;
+            }
+            continue;
+        }
+
+        // Path doesn't exist — use prefix-based check after normalizing away ..
+        // This allows ~/Downloads to be approved even if the directory hasn't been created yet
+        if path_is_dir {
+            // Path is marked as a directory but canonicalize failed — strange edge case,
+            // conservatively deny
+            continue;
+        }
+
+        // Normalize the path by resolving .. components and comparing prefixes
+        let normalized = normalize_path_for_prefix_check(&expanded_path);
+        let canonical_root_str = canonical_root.to_string_lossy();
+
+        // Normalize the root for comparison too
+        let normalized_root = normalize_path_for_prefix_check(&expanded_root);
+
+        if normalized.starts_with(&normalized_root) || normalized.starts_with(&*canonical_root_str)
+        {
             return true;
         }
     }
 
     false
+}
+
+/// Normalizes a path for prefix-based comparison by resolving .. components.
+/// Does NOT require the path to exist. Used only when canonicalize fails.
+/// Handles paths like ~/Downloads/../other but does NOT allow bypass via ..
+fn normalize_path_for_prefix_check(path: &Path) -> String {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|p| p.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    for component in abs.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if !parts.is_empty() {
+                    parts.pop();
+                }
+            }
+            std::path::Component::Normal(s) => {
+                if let Some(s_str) = s.to_str() {
+                    parts.push(s_str.to_string());
+                }
+            }
+            std::path::Component::RootDir => {
+                parts.clear();
+            }
+            // Ignore CurDir, etc.
+            _ => {}
+        }
+    }
+
+    if parts.is_empty() {
+        return abs
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .unwrap_or_default();
+    }
+
+    let base = if abs.is_absolute() {
+        std::path::Component::RootDir
+            .as_os_str()
+            .to_string_lossy()
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    if base.is_empty() {
+        parts.join("/")
+    } else {
+        base + &parts.join("/")
+    }
 }
 
 /// Authorize a plan without executing it. Returns preview of authorization decisions.
@@ -707,5 +790,99 @@ pub fn run_apply(
         Err(anyhow::anyhow!("{} step(s) failed", failed_count))
     } else {
         Ok(())
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_path_in_allowed_roots_expands_tilde() {
+        let home = std::env::var("HOME").unwrap();
+        let home_path = PathBuf::from(&home);
+
+        // ~/Downloads with absolute allowed root
+        let path = PathBuf::from("~/Downloads");
+        let allowed = vec![home_path.join("Downloads")];
+        assert!(
+            is_path_in_allowed_roots(&path, &allowed),
+            "~/Downloads should be allowed when $HOME/Downloads is allowed"
+        );
+    }
+
+    #[test]
+    fn test_is_path_in_allowed_roots_tilde_in_allowed_root() {
+        let home = std::env::var("HOME").unwrap();
+        let home_path = PathBuf::from(&home);
+
+        // ~/Downloads with tilde in allowed root
+        let path = PathBuf::from("~/Downloads");
+        let allowed = vec![PathBuf::from("~/Downloads")];
+        assert!(
+            is_path_in_allowed_roots(&path, &allowed),
+            "~/Downloads should be allowed when ~/Downloads is allowed"
+        );
+    }
+
+    #[test]
+    fn test_is_path_in_allowed_roots_denies_etc() {
+        let home = std::env::var("HOME").unwrap();
+        let home_path = PathBuf::from(&home);
+
+        // /etc should be denied when only home is allowed
+        let path = PathBuf::from("/etc");
+        let allowed = vec![home_path.join("Downloads")];
+        assert!(
+            !is_path_in_allowed_roots(&path, &allowed),
+            "/etc should be denied when only $HOME/Downloads is allowed"
+        );
+    }
+
+    #[test]
+    fn test_is_path_in_allowed_roots_dotdot_does_not_bypass() {
+        let home = std::env::var("HOME").unwrap();
+        let home_path = PathBuf::from(&home);
+
+        // ~/Downloads/.. should not bypass to home
+        let path = PathBuf::from("~/Downloads/..");
+        let allowed = vec![home_path.join("Downloads")];
+        // Path resolves to parent of Downloads which is $HOME, not inside Downloads
+        assert!(
+            !is_path_in_allowed_roots(&path, &allowed),
+            "~/Downloads/.. should not be allowed inside ~/Downloads"
+        );
+    }
+
+    #[test]
+    fn test_normalize_path_handles_parent_dir() {
+        // Normalize away .. components
+        let path = PathBuf::from("/home/user/Downloads/../Documents");
+        let normalized = normalize_path_for_prefix_check(&path);
+        assert!(
+            normalized.ends_with("Documents"),
+            "should resolve to Documents, got: {}",
+            normalized
+        );
+        assert!(
+            !normalized.contains(".."),
+            "normalized path should not contain ..: {}",
+            normalized
+        );
+    }
+
+    #[test]
+    fn test_normalize_path_preserves_absolute() {
+        let path = PathBuf::from("/home/user/Downloads");
+        let normalized = normalize_path_for_prefix_check(&path);
+        assert!(
+            normalized.starts_with('/'),
+            "absolute path should stay absolute: {}",
+            normalized
+        );
     }
 }

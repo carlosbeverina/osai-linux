@@ -214,6 +214,19 @@ else
     warn "$FOUND_SECRETS receipt file(s) may contain secrets (manual review recommended)"
 fi
 
+# Check 11: osai-api /ui Dev Panel
+echo ""
+echo "Check 11: osai-api /ui Dev Panel"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    --max-time 10 \
+    "${OSAI_API_URL}/ui" 2>&1) || true
+
+if [[ "$HTTP_CODE" == "200" ]]; then
+    ok "osai-api /ui returned HTTP $HTTP_CODE"
+else
+    fail "osai-api /ui returned HTTP $HTTP_CODE (expected 200)"
+fi
+
 echo ""
 echo "=== Summary ==="
 if [[ $FAILURES -eq 0 ]]; then

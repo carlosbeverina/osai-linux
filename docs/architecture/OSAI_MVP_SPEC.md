@@ -217,6 +217,55 @@ Fedora Atomic / Universal Blue / BlueBuild
 
 **Purpose**: Local HTTP service exposing OSAI agent capabilities via `osai-agent-core`. Provides a programmatic API for future desktop/shell UI without shelling out to `osai-agent-cli`.
 
+#### OSAI API Dev Panel
+
+A local Dev Panel UI is available at `http://127.0.0.1:8090/ui` for validating the full API-driven flow during development.
+
+**URL**: `http://127.0.0.1:8090/ui`
+**Scope**: Temporary API validation prototype, NOT the final OSAI desktop shell.
+**Purpose**: Validate API contracts and user interaction flow before choosing/forking a desktop base.
+
+**Dev Panel Capabilities**:
+- Status panel (health, Model Router reachability, capabilities)
+- Chat panel (POST /v1/chat)
+- Ask / Plan generation panel (POST /v1/ask)
+- Plans panel (GET /v1/plans, GET /v1/plans/read)
+- Plan validation panel (POST /v1/plans/validate)
+- Authorization preview panel (POST /v1/plans/authorize)
+- Apply panel (POST /v1/apply with dry-run and real-execution modes)
+- Receipts panel (GET /v1/receipts, GET /v1/receipts/read)
+- Activity log of recent UI actions/errors
+
+**Validated UI Flow**:
+1. `GET /v1/status` - Check local stack health
+2. `POST /v1/chat` - Test model chat
+3. `POST /v1/ask` - Generate plan from natural language
+4. `GET /v1/plans` / `GET /v1/plans/read` - Browse and preview plans
+5. `POST /v1/plans/validate` - Validate plan before authorization
+6. `POST /v1/plans/authorize` - Preview authorization decisions (no execution)
+7. `POST /v1/apply` with `dry_run=true` - Simulate execution
+8. `POST /v1/apply` with `dry_run=false` - Execute after explicit user approval + authorization in session
+9. `GET /v1/receipts` - Audit history after execution
+
+**Safety Gates in Dev Panel**:
+- Real execution button is disabled by default
+- Requires checkbox "I understand this may execute actions"
+- Requires plan to be authorized in the current UI session
+- Requires explicit browser confirm() before real execution
+- dry_run defaults to true
+
+**Security Properties**:
+- No external network assets (CDN, fonts, images)
+- No localStorage for API responses or prompts
+- Loopback-only binding (127.0.0.1)
+- No analytics or telemetry
+
+**Current Limitations**:
+- Single-page HTML/CSS/JS only, no framework
+- No authentication (future desktop UI handles auth)
+- No streaming responses
+- Single-user only
+
 **API Endpoints**:
 
 Core (existing):
@@ -254,16 +303,6 @@ All endpoints accept optional `model_router_url`, `receipts_dir`, `plans_dir` fi
 - No streaming responses
 - No WebSocket support yet
 - Single-user only
-
-**Recommended UI Flow**:
-1. `GET /v1/status` - Check local stack health
-2. `POST /v1/chat` or `POST /v1/ask` - Interact with model
-3. `GET /v1/plans` / `GET /v1/plans/read` - Browse and preview plans
-4. `POST /v1/plans/validate` - Validate plan before authorization
-5. `POST /v1/plans/authorize` - Preview authorization decisions
-6. `POST /v1/apply` with `dry_run=true` - Simulate execution
-7. `POST /v1/apply` with `dry_run=false` - Execute after explicit user approval
-8. `GET /v1/receipts` - Audit history after execution
 
 ## 4. Current CLI Commands
 
