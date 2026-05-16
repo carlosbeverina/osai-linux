@@ -38,6 +38,7 @@ pub struct CapabilitiesInfo {
     pub plans: bool,
     pub receipts: bool,
     pub runtime_status: bool,
+    pub auth_status: bool,
 }
 
 impl StatusResponse {
@@ -65,6 +66,7 @@ impl StatusResponse {
                 plans: true,
                 receipts: true,
                 runtime_status: true,
+                auth_status: true,
             },
         }
     }

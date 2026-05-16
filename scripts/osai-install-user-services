@@ -77,6 +77,16 @@ mkdir -p "${HOME}/.config/osai"
 mkdir -p "${HOME}/.local/share/osai/receipts/model-router"
 mkdir -p "${HOME}/.local/share/osai/receipts/llamacpp"
 
+# Create local API token file if missing
+TOKEN_FILE="${HOME}/.config/osai/api-token"
+if [[ ! -f "$TOKEN_FILE" ]]; then
+    # Generate a random 64-char hex token
+    RANDOM_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p | tr -d '\n')
+    echo "$RANDOM_TOKEN" > "$TOKEN_FILE"
+    chmod 0600 "$TOKEN_FILE"
+    echo "osai-api local token initialized at ~/.config/osai/api-token"
+fi
+
 # Create llama.cpp env file (paths are expanded at install time, not at runtime)
 LLAMACPP_ENV="${HOME}/.config/osai/llamacpp.env"
 cat > "$LLAMACPP_ENV" << ENVFILE

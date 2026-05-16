@@ -56,6 +56,19 @@
 <h1>OSAI API Dev Panel</h1>
 <div id="activity-log" style="margin-bottom:16px; font-size:11px; max-height:80px; overflow-y:auto;"></div>
 
+<!-- Token Auth Section -->
+<div class="panel" style="margin-bottom:12px;">
+  <div class="panel-header">
+    <span class="panel-title">Local API Token</span>
+    <button class="secondary" onclick="clearToken()" id="clear-token-btn" style="display:none;">Clear token</button>
+  </div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <input type="password" id="api-token-input" placeholder="Paste token from ~/.config/osai/api-token" style="flex:1;">
+    <button onclick="useToken()" id="use-token-btn">Use token</button>
+  </div>
+  <div id="auth-status" style="font-size:11px; margin-top:4px; color:#8b949e;">Token: not set</div>
+</div>
+
 <div class="grid">
   <!-- Status Panel -->
   <div class="panel">
@@ -174,8 +187,50 @@ let state = {
   selectedPlan: null,
   authorizedPlan: null,
   plans: [],
-  receipts: []
+  receipts: [],
+  token: null
 };
+
+// Token management
+function useToken() {
+  const input = document.getElementById('api-token-input');
+  const token = input.value.trim();
+  if (!token) return;
+  state.token = token;
+  input.value = '';
+  updateAuthStatus();
+  document.getElementById('clear-token-btn').style.display = '';
+  log('Token set (not echoed in logs)');
+  refreshStatus();
+  refreshRuntimeStatus();
+}
+
+function clearToken() {
+  state.token = null;
+  updateAuthStatus();
+  document.getElementById('clear-token-btn').style.display = 'none';
+  log('Token cleared');
+  refreshStatus();
+}
+
+function updateAuthStatus() {
+  const el = document.getElementById('auth-status');
+  if (state.token) {
+    el.textContent = 'Token: set (hidden)';
+    el.style.color = '#2ea043';
+  } else {
+    el.textContent = 'Token: not set — many endpoints will fail';
+    el.style.color = '#d29922';
+  }
+}
+
+function getHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (state.token) {
+    headers['Authorization'] = 'Bearer ' + state.token;
+  }
+  return headers;
+}
 
 // Activity log
 function log(msg, type='info') {
@@ -200,18 +255,20 @@ async function refreshStatus() {
     const [health, status, caps] = await Promise.all([
       fetch(API + '/health').then(r => r.json()).catch(() => null),
       fetch(API + '/v1/status').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(API + '/v1/capabilities').then(r => r.ok ? r.json() : null).catch(() => null)
+      fetch(API + '/v1/capabilities').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(API + '/v1/auth/status').then(r => r.ok ? r.json() : null).catch(() => null)
     ]);
 
     const healthOk = health && health.ok;
     const routerReachable = status && status.model_router && status.model_router.reachable;
     const modelStatus = status ? status.models_status : null;
+    const authRequired = caps && caps.auth_status;
 
     el.innerHTML = `
       <div class="${healthOk ? 'status-ok' : 'status-fail'}">osai-api health: ${healthOk ? 'OK' : 'FAIL'}</div>
       <div class="${routerReachable ? 'status-ok' : 'status-fail'}">Model Router reachable: ${routerReachable ? 'true' : 'false'}</div>
       ${modelStatus ? `<div class="status-warn">Model: ${JSON.stringify(modelStatus)}</div>` : ''}
-      ${caps ? `<div>Capabilities: chat=${caps.chat}, ask=${caps.ask}, plan_authorize=${caps.plan_authorize}, apply=${caps.apply}, plans=${caps.plans}, receipts=${caps.receipts}</div>` : '<div class="status-fail">Capabilities: unavailable</div>'}
+      ${caps ? `<div>Capabilities: chat=${caps.chat}, ask=${caps.ask}, plan_authorize=${caps.plan_authorize}, apply=${caps.apply}, plans=${caps.plans}, receipts=${caps.receipts}, auth_status=${caps.auth_status}</div>` : '<div class="status-fail">Capabilities: unavailable</div>'}
     `;
     log('Status refreshed: model_router.reachable=' + String(routerReachable));
   } catch (e) {
@@ -297,9 +354,15 @@ async function sendChat() {
   try {
     const res = await fetch(API + '/v1/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({ message: msg })
     });
+    if (res.status === 401) {
+      out.textContent = 'Error: unauthorized — set your token using the "Use token" button above.';
+      out.className = 'output error';
+      log('Chat auth required', 'error');
+      return;
+    }
     const data = await res.json();
     if (data.status === 'success' && data.content) {
       out.textContent = data.content;
@@ -326,9 +389,15 @@ async function sendAsk() {
   try {
     const res = await fetch(API + '/v1/ask', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({ request: req })
     });
+    if (res.status === 401) {
+      out.textContent = 'Error: unauthorized — set your token using the "Use token" button above.';
+      out.className = 'output error';
+      log('Ask auth required', 'error');
+      return;
+    }
     const data = await res.json();
     if (data.status === 'success' && data.output_path) {
       out.textContent = `Status: ${data.status}\nOutput: ${data.output_path}\nValidation: ${data.validation}`;
@@ -355,7 +424,12 @@ async function refreshPlans() {
   const el = document.getElementById('plans-list');
   el.innerHTML = 'Loading...';
   try {
-    const res = await fetch(API + '/v1/plans?limit=20');
+    const res = await fetch(API + '/v1/plans?limit=20', { headers: getHeaders() });
+    if (res.status === 401) {
+      el.innerHTML = 'Error: unauthorized — set your token above.';
+      log('Plans load auth required', 'error');
+      return;
+    }
     const data = await res.json();
     if (data.ok) {
       state.plans = data.plans || [];
@@ -392,7 +466,12 @@ async function selectPlan(path) {
 
   try {
     const encoded = encodeURIComponent(path);
-    const res = await fetch(API + '/v1/plans/read?path=' + encoded);
+    const res = await fetch(API + '/v1/plans/read?path=' + encoded, { headers: getHeaders() });
+    if (res.status === 401) {
+      document.getElementById('plan-content').textContent = 'Error: unauthorized — set your token above.';
+      log('Plan read auth required', 'error');
+      return;
+    }
     const data = await res.json();
     if (data.ok) {
       document.getElementById('plan-content').textContent = data.raw;
@@ -443,9 +522,15 @@ async function validatePlan() {
   try {
     const res = await fetch(API + '/v1/plans/validate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({ plan_path: state.selectedPlan })
     });
+    if (res.status === 401) {
+      el.textContent = 'Error: unauthorized — set your token above.';
+      el.className = 'output error';
+      log('Validate auth required', 'error');
+      return;
+    }
     const data = await res.json();
     el.textContent = `ok: ${data.ok}, valid: ${data.valid}${data.error ? '\nerror: ' + data.error : ''}`;
     el.className = data.valid ? 'output success' : 'output error';
@@ -474,7 +559,7 @@ async function authorizePlan() {
 
     const res = await fetch(API + '/v1/plans/authorize', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({
         plan_path: state.selectedPlan,
         allowed_roots: allowedRoots,
@@ -482,6 +567,12 @@ async function authorizePlan() {
         approve_all: approveAll
       })
     });
+    if (res.status === 401) {
+      el.textContent = 'Error: unauthorized — set your token above.';
+      el.className = 'output error';
+      log('Authorize auth required', 'error');
+      return;
+    }
     const data = await res.json();
     if (data.ok) {
       const rows = data.steps.map(s =>
@@ -527,13 +618,19 @@ async function applyPlan(dryRun) {
 
     const res = await fetch(API + '/v1/apply', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({
         plan_path: state.selectedPlan,
         allowed_roots: allowedRoots,
         dry_run: dryRun
       })
     });
+    if (res.status === 401) {
+      el.textContent = 'Error: unauthorized — set your token above.';
+      el.className = 'output error';
+      log('Apply auth required', 'error');
+      return;
+    }
     const data = await res.json();
     el.textContent = `status: ${data.status}\nexecuted: ${data.executed}\nskipped: ${data.skipped}\ndenied: ${data.denied}\napproval_required: ${data.approval_required}\nfailed: ${data.failed}${data.error ? '\nerror: ' + data.error : ''}${data.approved_steps && data.approved_steps.length ? '\napproved_steps: ' + data.approved_steps.join(', ') : ''}`;
     el.className = data.status === 'success' ? 'output success' : 'output error';
@@ -550,7 +647,12 @@ async function refreshReceipts() {
   const el = document.getElementById('receipts-list');
   el.innerHTML = 'Loading...';
   try {
-    const res = await fetch(API + '/v1/receipts?limit=20');
+    const res = await fetch(API + '/v1/receipts?limit=20', { headers: getHeaders() });
+    if (res.status === 401) {
+      el.innerHTML = 'Error: unauthorized — set your token above.';
+      log('Receipts load auth required', 'error');
+      return;
+    }
     const data = await res.json();
     if (data.ok) {
       state.receipts = data.receipts || [];
@@ -582,7 +684,12 @@ async function selectReceipt(path) {
   content.textContent = 'Loading...';
   try {
     const encoded = encodeURIComponent(path);
-    const res = await fetch(API + '/v1/receipts/read?path=' + encoded);
+    const res = await fetch(API + '/v1/receipts/read?path=' + encoded, { headers: getHeaders() });
+    if (res.status === 401) {
+      content.textContent = 'Error: unauthorized — set your token above.';
+      log('Receipt read auth required', 'error');
+      return;
+    }
     const data = await res.json();
     if (data.ok) {
       content.textContent = JSON.stringify(data.receipt, null, 2);

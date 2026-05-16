@@ -41,3 +41,6 @@ export OSAI_MODEL_ROUTER_MOCK_CLOUD="${OSAI_MODEL_ROUTER_MOCK_CLOUD:-true}"
 # Receipt directories
 export OSAI_LOCAL_TOOL_RECEIPTS_DIR="${OSAI_LOCAL_TOOL_RECEIPTS_DIR:-/tmp/osai-tool-receipts-llamacpp}"
 export OSAI_LOCAL_MODEL_RECEIPTS_DIR="${OSAI_LOCAL_MODEL_RECEIPTS_DIR:-/tmp/osai-model-router-receipts-llamacpp}"
+
+# Local API token (optional — if not set, osai-api reads ~/.config/osai/api-token)
+export OSAI_API_TOKEN="${OSAI_API_TOKEN:-}"

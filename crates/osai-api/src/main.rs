@@ -2,6 +2,7 @@
 //!
 //! Binds to loopback only (127.0.0.1) by default for security.
 
+mod auth;
 mod errors;
 mod plans;
 mod receipts;
@@ -23,6 +24,7 @@ use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 
+use auth::{validate_token, AuthStatusResponse};
 use errors::{send_error, ErrorResponse};
 
 // Version constant
@@ -43,6 +45,7 @@ struct CapabilitiesResponse {
     plans: bool,
     receipts: bool,
     runtime_status: bool,
+    auth_status: bool,
 }
 
 /// Chat API request (v1)
@@ -174,6 +177,65 @@ async fn send_json<S: Serialize>(
 }
 
 // ============================================================================
+// Authentication
+// ============================================================================
+
+/// Returns true if the given path is a protected endpoint requiring auth.
+fn is_protected_path(method: &str, path: &str) -> bool {
+    matches!(
+        (method, path),
+        ("POST", "/v1/chat")
+            | ("POST", "/v1/ask")
+            | ("GET", "/v1/plans")
+            | ("GET", "/v1/plans/read")
+            | ("POST", "/v1/plans/validate")
+            | ("POST", "/v1/plans/authorize")
+            | ("POST", "/v1/apply")
+            | ("GET", "/v1/receipts")
+            | ("GET", "/v1/receipts/read")
+    )
+}
+
+/// Extract Bearer token from Authorization header value.
+fn extract_bearer_token(header: &str) -> Option<&str> {
+    header
+        .strip_prefix("Bearer ")
+        .or_else(|| header.strip_prefix("bearer "))
+}
+
+/// Check auth and send 401 if missing/invalid. Returns true if request should proceed.
+async fn check_auth(
+    stream: &mut tokio::net::TcpStream,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+) -> bool {
+    if !is_protected_path(method, path) {
+        return true;
+    }
+
+    // Look for Authorization: Bearer <token> or X-OSAI-Token: <token>
+    let token_opt = headers.iter().find_map(|(name, value)| {
+        if name.eq_ignore_ascii_case("authorization") {
+            extract_bearer_token(value)
+        } else if name.eq_ignore_ascii_case("x-osai-token") {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    });
+
+    match token_opt {
+        Some(token) if validate_token(token) => true,
+        _ => {
+            let err = ErrorResponse::unauthorized();
+            send_error(stream, 401, &err).await.ok();
+            false
+        }
+    }
+}
+
+// ============================================================================
 // Request Handlers
 // ============================================================================
 
@@ -204,8 +266,14 @@ async fn handle_capabilities(stream: &mut tokio::net::TcpStream) -> anyhow::Resu
         plans: true,
         receipts: true,
         runtime_status: true,
+        auth_status: true,
     };
     send_json(stream, 200, &resp).await
+}
+
+/// Handle GET /v1/auth/status
+async fn handle_auth_status(stream: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
+    send_json(stream, 200, &AuthStatusResponse::new()).await
 }
 
 /// Handle GET /v1/status
@@ -783,17 +851,22 @@ pub(crate) async fn read_static_file(filename: &str) -> Option<Vec<u8>> {
 // Router
 // ============================================================================
 
-/// Route request to handler
+type HeaderSlice<'a> = &'a [(String, String)];
+
+/// Route request to handler (auth guard must be called before this for protected routes).
 async fn route(
     stream: &mut tokio::net::TcpStream,
     method: &str,
     path: &str,
     query: &str,
     body: &[u8],
+    headers: HeaderSlice<'_>,
 ) -> anyhow::Result<()> {
     match (method, path) {
         // Health
         ("GET", "/health") => handle_health(stream).await?,
+        // Auth status (unauthenticated)
+        ("GET", "/v1/auth/status") => handle_auth_status(stream).await?,
         // UI static files
         ("GET", "/ui") | ("GET", "/ui/") | ("GET", "/ui/index.html") => {
             match read_static_file("ui.html").await {
@@ -813,19 +886,79 @@ async fn route(
             let status = runtime_status::handle_runtime_status().await;
             send_json(stream, 200, &status).await?;
         }
-        ("GET", "/v1/plans") => handle_plans_list(stream, query).await?,
-        ("GET", "/v1/plans/read") => handle_plans_read(stream, query).await?,
-        ("GET", "/v1/receipts") => handle_receipts_list(stream, query).await?,
-        ("GET", "/v1/receipts/read") => handle_receipts_read(stream, query).await?,
-        ("POST", "/v1/chat") => handle_chat(stream, body).await?,
-        ("POST", "/v1/ask") => handle_ask(stream, body).await?,
-        ("POST", "/v1/plans/validate") => handle_plan_validate(stream, body).await?,
-        ("POST", "/v1/plans/authorize") => handle_plans_authorize(stream, body).await?,
-        ("POST", "/v1/apply") => handle_apply(stream, body).await?,
+        ("GET", "/v1/plans") => {
+            if !check_auth(stream, method, path, headers).await {
+                return Ok(());
+            }
+            handle_plans_list(stream, query).await?;
+        }
+        ("GET", "/v1/plans/read") => {
+            if !check_auth(stream, method, path, headers).await {
+                return Ok(());
+            }
+            handle_plans_read(stream, query).await?;
+        }
+        ("GET", "/v1/receipts") => {
+            if !check_auth(stream, method, path, headers).await {
+                return Ok(());
+            }
+            handle_receipts_list(stream, query).await?;
+        }
+        ("GET", "/v1/receipts/read") => {
+            if !check_auth(stream, method, path, headers).await {
+                return Ok(());
+            }
+            handle_receipts_read(stream, query).await?;
+        }
+        ("POST", "/v1/chat") => {
+            if !check_auth(stream, method, path, headers).await {
+                return Ok(());
+            }
+            handle_chat(stream, body).await?;
+        }
+        ("POST", "/v1/ask") => {
+            if !check_auth(stream, method, path, headers).await {
+                return Ok(());
+            }
+            handle_ask(stream, body).await?;
+        }
+        ("POST", "/v1/plans/validate") => {
+            if !check_auth(stream, method, path, headers).await {
+                return Ok(());
+            }
+            handle_plan_validate(stream, body).await?;
+        }
+        ("POST", "/v1/plans/authorize") => {
+            if !check_auth(stream, method, path, headers).await {
+                return Ok(());
+            }
+            handle_plans_authorize(stream, body).await?;
+        }
+        ("POST", "/v1/apply") => {
+            if !check_auth(stream, method, path, headers).await {
+                return Ok(());
+            }
+            handle_apply(stream, body).await?;
+        }
         // Aliases for backwards compatibility
-        ("POST", "/chat") => handle_chat(stream, body).await?,
-        ("POST", "/ask") => handle_ask(stream, body).await?,
-        ("POST", "/apply") => handle_apply(stream, body).await?,
+        ("POST", "/chat") => {
+            if !check_auth(stream, method, "/v1/chat", headers).await {
+                return Ok(());
+            }
+            handle_chat(stream, body).await?;
+        }
+        ("POST", "/ask") => {
+            if !check_auth(stream, method, "/v1/ask", headers).await {
+                return Ok(());
+            }
+            handle_ask(stream, body).await?;
+        }
+        ("POST", "/apply") => {
+            if !check_auth(stream, method, "/v1/apply", headers).await {
+                return Ok(());
+            }
+            handle_apply(stream, body).await?;
+        }
         // 404
         _ => {
             let err = ErrorResponse::not_found("not found");
@@ -882,7 +1015,22 @@ async fn handle_connection(stream: tokio::net::TcpStream) {
         body.extend_from_slice(&buf[body_start..n]);
     }
 
-    if let Err(e) = route(&mut stream, method, path, query, &body).await {
+    // Parse headers for auth check
+    let headers: Vec<(String, String)> = request
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(2, ": ").collect();
+            if parts.len() == 2 {
+                Some((parts[0].to_string(), parts[1].to_string()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if let Err(e) = route(&mut stream, method, path, query, &body, &headers).await {
         eprintln!("request error: {}", e);
     }
 }
@@ -928,6 +1076,7 @@ mod tests {
             plans: true,
             receipts: true,
             runtime_status: true,
+            auth_status: true,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"chat\":true"));
@@ -935,6 +1084,24 @@ mod tests {
         assert!(json.contains("\"plans\":true"));
         assert!(json.contains("\"receipts\":true"));
         assert!(json.contains("\"runtime_status\":true"));
+        assert!(json.contains("\"auth_status\":true"));
+    }
+
+    #[test]
+    fn test_capabilities_includes_auth_status() {
+        let resp = CapabilitiesResponse {
+            chat: true,
+            ask: true,
+            plan_validate: true,
+            plan_authorize: true,
+            apply: true,
+            plans: true,
+            receipts: true,
+            runtime_status: true,
+            auth_status: true,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"auth_status\":true"));
     }
 
     #[test]
@@ -1323,6 +1490,116 @@ mod tests {
         assert!(
             content.contains("OSAI API Dev Panel"),
             "ui.html should contain 'OSAI API Dev Panel' marker"
+        );
+    }
+
+    // ========================================================================
+    // Auth tests
+    // ========================================================================
+
+    #[test]
+    fn test_is_protected_path_protected_routes() {
+        let protected = [
+            ("POST", "/v1/chat"),
+            ("POST", "/v1/ask"),
+            ("GET", "/v1/plans"),
+            ("GET", "/v1/plans/read"),
+            ("POST", "/v1/plans/validate"),
+            ("POST", "/v1/plans/authorize"),
+            ("POST", "/v1/apply"),
+            ("GET", "/v1/receipts"),
+            ("GET", "/v1/receipts/read"),
+        ];
+        for (method, path) in protected {
+            assert!(
+                super::is_protected_path(method, path),
+                "{} {} should be protected",
+                method,
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_protected_path_unprotected_routes() {
+        let unprotected = [
+            ("GET", "/health"),
+            ("GET", "/v1/status"),
+            ("GET", "/v1/capabilities"),
+            ("GET", "/v1/runtime/status"),
+            ("GET", "/v1/auth/status"),
+            ("GET", "/ui"),
+            ("GET", "/ui/"),
+            ("GET", "/ui/index.html"),
+            ("POST", "/v1/chat"), // but auth may still apply via check_auth
+        ];
+        // Only GET /health, /v1/status, /v1/capabilities, /v1/runtime/status, /v1/auth/status, /ui are truly unauthenticated
+        assert!(!super::is_protected_path("GET", "/health"));
+        assert!(!super::is_protected_path("GET", "/v1/status"));
+        assert!(!super::is_protected_path("GET", "/v1/capabilities"));
+        assert!(!super::is_protected_path("GET", "/v1/runtime/status"));
+        assert!(!super::is_protected_path("GET", "/v1/auth/status"));
+        assert!(!super::is_protected_path("GET", "/ui"));
+        assert!(!super::is_protected_path("GET", "/ui/index.html"));
+    }
+
+    #[test]
+    fn test_extract_bearer_token() {
+        assert_eq!(super::extract_bearer_token("Bearer abc123"), Some("abc123"));
+        assert_eq!(super::extract_bearer_token("bearer xyz789"), Some("xyz789"));
+        assert_eq!(super::extract_bearer_token("Basic abc123"), None);
+        assert_eq!(super::extract_bearer_token("abc123"), None);
+        assert_eq!(super::extract_bearer_token("Bearer "), Some(""));
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(crate::auth::constant_time_eq(b"abc123", b"abc123"));
+        assert!(!crate::auth::constant_time_eq(b"abc123", b"abc124"));
+        assert!(!crate::auth::constant_time_eq(b"abc123", b"abc12"));
+        assert!(!crate::auth::constant_time_eq(b"abc123", b""));
+        assert!(crate::auth::constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn test_auth_status_response_no_token() {
+        // When no token is set, auth_required should be false (auth disabled)
+        let resp = super::AuthStatusResponse::new();
+        assert!(resp.ok);
+        assert!(!resp.auth_required);
+        assert_eq!(resp.token_source, "disabled");
+    }
+
+    #[test]
+    fn test_auth_status_response_token_source() {
+        use crate::auth::TokenSource;
+        assert_eq!(TokenSource::Env.as_str(), "env");
+        assert_eq!(TokenSource::File.as_str(), "file");
+        assert_eq!(TokenSource::Disabled.as_str(), "disabled");
+    }
+
+    #[test]
+    fn test_error_response_unauthorized() {
+        let err = super::ErrorResponse::unauthorized();
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"ok\":false"));
+        assert!(json.contains("\"code\":\"unauthorized\""));
+        assert!(json.contains("\"message\":\"missing or invalid local API token\""));
+    }
+
+    #[test]
+    fn test_token_file_path_is_home_based() {
+        let path = super::auth::token_file_path();
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains(".config"),
+            "token file path should be under .config: {}",
+            path_str
+        );
+        assert!(
+            path_str.contains("osai"),
+            "token file path should contain 'osai': {}",
+            path_str
         );
     }
 }

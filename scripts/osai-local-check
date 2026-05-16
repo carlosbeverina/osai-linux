@@ -10,6 +10,15 @@ source "${SCRIPT_DIR}/osai-local-env"
 
 FAILURES=0
 
+# Load API token (prefer env var, then token file)
+if [[ -n "${OSAI_API_TOKEN:-}" ]]; then
+    API_TOKEN="${OSAI_API_TOKEN}"
+elif [[ -f "${HOME}/.config/osai/api-token" ]]; then
+    API_TOKEN=$(cat "${HOME}/.config/osai/api-token" 2>/dev/null || echo "")
+else
+    API_TOKEN=""
+fi
+
 ok()  { echo "[OK]   $1"; }
 warn() { echo "[WARN] $1"; }
 fail() { echo "[FAIL] $1"; FAILURES=$((FAILURES + 1)); }
@@ -121,11 +130,18 @@ fi
 
 # Check 6: osai-api /v1/chat smoke test
 echo ""
-echo "Check 6: osai-api /v1/chat smoke test"
+echo "Check 6: osai-api /v1/chat smoke test (with auth)"
+
+# Build auth headers if token is available
+AUTH_HEADERS=()
+if [[ -n "$API_TOKEN" ]]; then
+    AUTH_HEADERS=(-H "Authorization: Bearer ${API_TOKEN}")
+fi
 
 HTTP_CODE=$(curl -s -o /tmp/osai-chat-body.txt -w "%{http_code}" --max-time 120 \
     -X POST "${OSAI_API_URL}/v1/chat" \
     -H "Content-Type: application/json" \
+    "${AUTH_HEADERS[@]}" \
     -d '{"message":"Reply with exactly: OSAI API local stack OK"}' 2>&1) || true
 
 CHAT_RESPONSE=$(cat /tmp/osai-chat-body.txt 2>/dev/null || echo "")

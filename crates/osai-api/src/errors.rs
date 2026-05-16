@@ -42,6 +42,11 @@ impl ErrorResponse {
     pub fn internal(message: &str) -> Self {
         Self::new("internal_error", message)
     }
+
+    /// Unauthorized (401).
+    pub fn unauthorized() -> Self {
+        Self::new("unauthorized", "missing or invalid local API token")
+    }
 }
 
 /// Send a JSON error response over a TCP stream.
@@ -55,6 +60,7 @@ where
         "HTTP/1.1 {} \r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
         match status {
             400 => "400 Bad Request",
+            401 => "401 Unauthorized",
             404 => "404 Not Found",
             405 => "405 Method Not Allowed",
             500 => "500 Internal Server Error",
