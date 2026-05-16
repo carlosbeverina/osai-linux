@@ -54,6 +54,7 @@ pub fn chat_core(
 
     // Call model router
     let client = reqwest::blocking::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
@@ -172,6 +173,7 @@ pub async fn chat_core_async(
 
     // Call model router asynchronously
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;

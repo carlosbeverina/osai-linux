@@ -18,6 +18,8 @@ pub struct AskResult {
     pub output_path: Option<String>,
     pub validation: String,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yaml_output: Option<String>,
 }
 
 fn write_ask_receipt(
@@ -121,6 +123,7 @@ async fn ask_model_call_async(
     };
 
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
@@ -386,12 +389,13 @@ metadata: {}
         output_path: Some(absolute_output_path.display().to_string()),
         validation: "valid".to_string(),
         error: None,
+        yaml_output: Some(yaml_output),
     })
 }
 
-/// Runs an ask operation - generates a safe OSAI Plan DSL YAML from a natural language request.
-pub fn run_ask(
-    message_arg: Option<&str>,
+/// Blocking core ask logic - generates a plan and returns data without printing.
+pub fn ask_core(
+    request: &str,
     model_router_url: &str,
     receipts_dir_override: Option<&Path>,
     plans_dir_override: Option<&Path>,
@@ -399,12 +403,8 @@ pub fn run_ask(
     privacy: &str,
     max_tokens: Option<u32>,
     temperature: f32,
-    json_output: bool,
-    print_plan: bool,
     output_override: Option<&Path>,
-    positional_request: &[String],
-) -> Result<()> {
-    // Validate loopback URL
+) -> Result<AskResult> {
     if !is_loopback_url(model_router_url) {
         return Err(anyhow::anyhow!(
             "Model router URL must be loopback only (127.0.0.1 or localhost): {}",
@@ -412,32 +412,209 @@ pub fn run_ask(
         ));
     }
 
-    // Resolve request: check --message and positional separately
-    let has_positional = !positional_request.is_empty();
-    let has_message_arg = message_arg.is_some();
+    let request_length = request.len();
+    let system_prompt = plan_generation_system_prompt();
 
-    if has_positional && has_message_arg {
-        return Err(anyhow::anyhow!(
-            "Cannot use both positional request and --message flag. Use one or the other."
-        ));
-    }
-
-    if !has_positional && !has_message_arg {
-        return Err(anyhow::anyhow!(
-            "No request provided. Use a positional request or --message flag."
-        ));
-    }
-
-    let request: String = if has_message_arg {
-        message_arg.unwrap().to_string()
-    } else {
-        positional_request.join(" ")
+    let chat_request = ChatRequest {
+        model: model.to_string(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: request.to_string(),
+            },
+        ],
+        max_tokens: max_tokens.or(Some(1200)),
+        temperature,
+        metadata: ChatMetadata {
+            privacy: privacy.to_string(),
+        },
     };
 
-    let request_length = request.len();
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
 
-    // Build system prompt for safe plan generation
-    let system_prompt = r#"You are an OSAI plan generator. Return ONLY valid OSAI Plan DSL YAML with no markdown fences, no explanation, and no additional text.
+    let url = format!("{}/v1/chat/completions", model_router_url);
+
+    let response = client
+        .post(&url)
+        .json(&chat_request)
+        .send()
+        .map_err(|e| anyhow::anyhow!("Model router request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        write_ask_receipt(
+            receipts_dir_override,
+            model_router_url,
+            model,
+            privacy,
+            request_length,
+            None,
+            "Failed",
+            Some(&format!("Model router returned error {}: {}", status, body)),
+        )?;
+        return Err(anyhow::anyhow!(
+            "Model router returned error {}: {}",
+            status,
+            body
+        ));
+    }
+
+    let chat_response: ChatResponse = response
+        .json()
+        .map_err(|e| anyhow::anyhow!("Failed to parse model router response: {}", e))?;
+
+    let content = chat_response
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("Model response missing content"))?
+        .clone();
+
+    persist_generated_plan(
+        &content,
+        request,
+        model_router_url,
+        receipts_dir_override,
+        plans_dir_override,
+        model,
+        privacy,
+        request_length,
+        output_override,
+    )
+}
+
+fn persist_generated_plan(
+    content: &str,
+    request: &str,
+    model_router_url: &str,
+    receipts_dir_override: Option<&Path>,
+    plans_dir_override: Option<&Path>,
+    model: &str,
+    privacy: &str,
+    request_length: usize,
+    output_override: Option<&Path>,
+) -> Result<AskResult> {
+    let yaml_content = sanitize_yaml_response(content);
+
+    let mut plan = match OsaiPlan::from_yaml(&yaml_content) {
+        Ok(p) => p,
+        Err(e) => {
+            write_ask_receipt(
+                receipts_dir_override,
+                model_router_url,
+                model,
+                privacy,
+                request_length,
+                None,
+                "Failed",
+                Some(&format!("YAML parse error: {}", e)),
+            )?;
+            return Err(anyhow::anyhow!(
+                "Model returned invalid YAML: {}
+Raw response: {}",
+                e,
+                yaml_content.chars().take(200).collect::<String>()
+            ));
+        }
+    };
+
+    if let Err(e) = plan.validate() {
+        write_ask_receipt(
+            receipts_dir_override,
+            model_router_url,
+            model,
+            privacy,
+            request_length,
+            None,
+            "Failed",
+            Some(&format!("Validation error: {}", e)),
+        )?;
+        return Err(anyhow::anyhow!(
+            "Generated plan is invalid: {}
+YAML:
+{}",
+            e,
+            yaml_content
+        ));
+    }
+
+    let example_uuid = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").ok();
+    if let Some(expected) = example_uuid {
+        if plan.id == expected {
+            plan.id = uuid::Uuid::new_v4();
+        }
+    }
+
+    let output_path = if let Some(path) = output_override {
+        if path.exists() {
+            return Err(anyhow::anyhow!(
+                "Output path already exists: {}",
+                path.display()
+            ));
+        }
+        path.to_path_buf()
+    } else {
+        let plans_dir = plans_dir_override
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| default_ask_plans_dir());
+        let slug = slug_from_request(request);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let filename = format!("{}-{}.yml", slug, timestamp);
+        let full_path = plans_dir.join(&filename);
+        if full_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Generated plan path already exists: {}",
+                full_path.display()
+            ));
+        }
+        full_path
+    };
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("Failed to create plans directory: {}", e))?;
+    }
+
+    let yaml_output = plan
+        .to_yaml()
+        .map_err(|e| anyhow::anyhow!("Failed to serialize plan to YAML: {}", e))?;
+    fs::write(&output_path, &yaml_output)
+        .map_err(|e| anyhow::anyhow!("Failed to write plan file: {}", e))?;
+
+    write_ask_receipt(
+        receipts_dir_override,
+        model_router_url,
+        model,
+        privacy,
+        request_length,
+        Some(&output_path),
+        "Executed",
+        None,
+    )?;
+
+    Ok(AskResult {
+        status: "success".to_string(),
+        output_path: Some(output_path.display().to_string()),
+        validation: "valid".to_string(),
+        error: None,
+        yaml_output: Some(yaml_output),
+    })
+}
+
+fn plan_generation_system_prompt() -> &'static str {
+    r#"You are an OSAI plan generator. Return ONLY valid OSAI Plan DSL YAML with no markdown fences, no explanation, and no additional text.
 
 ## REQUIRED YAML SCHEMA
 
@@ -502,210 +679,92 @@ metadata: {}
 - Do NOT include FilesWrite, FilesMove, FilesDelete (refuse destructive actions).
 - Prefer ModelChat or ReceiptCreate for information-only tasks.
 - risk: Low by default, Medium only with clear justification.
-- approval: Auto for read-only, Ask for anything that modifies state."#;
+- approval: Auto for read-only, Ask for anything that modifies state."#
+}
 
-    let _full_content = format!("{}\n\nUser request: {}", system_prompt, request);
-
-    // Build request
-    let chat_request = ChatRequest {
-        model: model.to_string(),
-        messages: vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt.to_string(),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: request.clone(),
-            },
-        ],
-        max_tokens: max_tokens.or(Some(1200)),
-        temperature,
-        metadata: ChatMetadata {
-            privacy: privacy.to_string(),
-        },
-    };
-
-    // Call model router
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
-
-    let url = format!("{}/v1/chat/completions", model_router_url);
-
-    let response = client
-        .post(&url)
-        .json(&chat_request)
-        .send()
-        .map_err(|e| anyhow::anyhow!("Model router request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        // Write failed receipt
-        write_ask_receipt(
-            receipts_dir_override,
-            model_router_url,
-            model,
-            privacy,
-            request_length,
-            None,
-            "Failed",
-            Some(&format!("Model router returned error {}: {}", status, body)),
-        )?;
+/// Runs an ask operation - generates a safe OSAI Plan DSL YAML from a natural language request.
+pub fn run_ask(
+    message_arg: Option<&str>,
+    model_router_url: &str,
+    receipts_dir_override: Option<&Path>,
+    plans_dir_override: Option<&Path>,
+    model: &str,
+    privacy: &str,
+    max_tokens: Option<u32>,
+    temperature: f32,
+    json_output: bool,
+    print_plan: bool,
+    output_override: Option<&Path>,
+    positional_request: &[String],
+) -> Result<()> {
+    if !is_loopback_url(model_router_url) {
         return Err(anyhow::anyhow!(
-            "Model router returned error {}: {}",
-            status,
-            body
+            "Model router URL must be loopback only (127.0.0.1 or localhost): {}",
+            model_router_url
         ));
     }
 
-    let chat_response: ChatResponse = response
-        .json()
-        .map_err(|e| anyhow::anyhow!("Failed to parse model router response: {}", e))?;
+    let has_positional = !positional_request.is_empty();
+    let has_message_arg = message_arg.is_some();
 
-    // Extract content
-    let content = chat_response
-        .choices
-        .first()
-        .and_then(|c| c.message.content.as_ref())
-        .ok_or_else(|| anyhow::anyhow!("Model response missing content"))?
-        .clone();
-
-    // Sanitize YAML response (strip markdown fences if present)
-    let yaml_content = sanitize_yaml_response(&content);
-
-    // Try to parse as OSAI Plan
-    let mut plan = match OsaiPlan::from_yaml(&yaml_content) {
-        Ok(p) => p,
-        Err(e) => {
-            // Write failed receipt
-            write_ask_receipt(
-                receipts_dir_override,
-                model_router_url,
-                model,
-                privacy,
-                request_length,
-                None,
-                "Failed",
-                Some(&format!("YAML parse error: {}", e)),
-            )?;
-            return Err(anyhow::anyhow!(
-                "Model returned invalid YAML: {}\nRaw response: {}",
-                e,
-                yaml_content.chars().take(200).collect::<String>()
-            ));
-        }
-    };
-
-    // Validate plan
-    if let Err(e) = plan.validate() {
-        // Write failed receipt
-        write_ask_receipt(
-            receipts_dir_override,
-            model_router_url,
-            model,
-            privacy,
-            request_length,
-            None,
-            "Failed",
-            Some(&format!("Validation error: {}", e)),
-        )?;
+    if has_positional && has_message_arg {
         return Err(anyhow::anyhow!(
-            "Generated plan is invalid: {}\nYAML:\n{}",
-            e,
-            yaml_content
+            "Cannot use both positional request and --message flag. Use one or the other."
         ));
     }
 
-    // Replace example UUID with a fresh generated UUID
-    let example_uuid = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").ok();
-    if let Some(expected) = example_uuid {
-        if plan.id == expected {
-            plan.id = uuid::Uuid::new_v4();
-        }
+    if !has_positional && !has_message_arg {
+        return Err(anyhow::anyhow!(
+            "No request provided. Use a positional request or --message flag."
+        ));
     }
 
-    // Determine output path using persistent XDG location
-    let output_path = if let Some(path) = output_override {
-        if path.exists() {
-            return Err(anyhow::anyhow!(
-                "Output path already exists: {}",
-                path.display()
-            ));
-        }
-        path.to_path_buf()
+    let request: String = if has_message_arg {
+        message_arg.unwrap().to_string()
     } else {
-        let plans_dir = plans_dir_override
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| default_ask_plans_dir());
-        let slug = slug_from_request(&request);
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let filename = format!("{}-{}.yml", slug, timestamp);
-        let full_path = plans_dir.join(&filename);
-        if full_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Generated plan path already exists: {}",
-                full_path.display()
-            ));
-        }
-        full_path
+        positional_request.join(" ")
     };
 
-    // Create parent directories if needed
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("Failed to create plans directory: {}", e))?;
-    }
-
-    // Save plan
-    let yaml_output = plan
-        .to_yaml()
-        .map_err(|e| anyhow::anyhow!("Failed to serialize plan to YAML: {}", e))?;
-    fs::write(&output_path, &yaml_output)
-        .map_err(|e| anyhow::anyhow!("Failed to write plan file: {}", e))?;
-
-    // Write success receipt
-    write_ask_receipt(
-        receipts_dir_override,
+    let result = ask_core(
+        &request,
         model_router_url,
+        receipts_dir_override,
+        plans_dir_override,
         model,
         privacy,
-        request_length,
-        Some(&output_path),
-        "Executed",
-        None,
+        max_tokens,
+        temperature,
+        output_override,
     )?;
 
-    // Print output
     if json_output {
         #[derive(Serialize)]
-        struct AskResult {
+        struct CliAskResult {
             status: String,
             output_path: String,
             validation: String,
         }
         println!(
             "{}",
-            serde_json::to_string_pretty(&AskResult {
-                status: "success".to_string(),
-                output_path: output_path.display().to_string(),
-                validation: "valid".to_string(),
+            serde_json::to_string_pretty(&CliAskResult {
+                status: result.status,
+                output_path: result.output_path.clone().unwrap_or_default(),
+                validation: result.validation,
             })
             .unwrap()
         );
     } else {
-        println!("Generated valid plan: {}", output_path.display());
+        println!(
+            "Generated valid plan: {}",
+            result.output_path.clone().unwrap_or_default()
+        );
     }
 
-    // Print plan if requested
     if print_plan {
         println!();
-        println!("{}", yaml_output);
+        if let Some(yaml_output) = result.yaml_output {
+            println!("{}", yaml_output);
+        }
     }
 
     Ok(())
@@ -742,6 +801,7 @@ mod tests {
             output_path: Some("/home/user/.local/share/osai/plans/test-123.yml".to_string()),
             validation: "valid".to_string(),
             error: None,
+            yaml_output: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("success"));
@@ -755,6 +815,7 @@ mod tests {
             output_path: None,
             validation: "invalid".to_string(),
             error: Some("model failed".to_string()),
+            yaml_output: None,
         };
         assert_eq!(result.status, "error");
         assert!(result.output_path.is_none());
