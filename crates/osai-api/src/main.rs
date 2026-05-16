@@ -132,6 +132,36 @@ struct ApplyResponseV1 {
     error: Option<String>,
 }
 
+fn apply_response_from_core_result(
+    result: anyhow::Result<osai_agent_core::ApplyCoreOutput>,
+    dry_run: bool,
+) -> ApplyResponseV1 {
+    match result {
+        Ok(output) => ApplyResponseV1 {
+            status: "success".to_string(),
+            executed: output.result.executed,
+            skipped: output.result.skipped,
+            denied: output.result.denied,
+            approval_required: output.result.approval_required,
+            failed: output.result.failed,
+            approved_steps: output.result.approved_steps,
+            dry_run: output.result.dry_run,
+            error: output.result.error,
+        },
+        Err(e) => ApplyResponseV1 {
+            status: "error".to_string(),
+            executed: 0,
+            skipped: 0,
+            denied: 0,
+            approval_required: 0,
+            failed: 0,
+            approved_steps: vec![],
+            dry_run,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
 /// Authorize API request
 #[derive(Debug, Deserialize)]
 struct AuthorizeRequest {
@@ -709,30 +739,7 @@ async fn handle_apply(stream: &mut tokio::net::TcpStream, body: &[u8]) -> anyhow
         dry_run,
     );
 
-    let resp = match result {
-        Ok(output) => ApplyResponseV1 {
-            status: "success".to_string(),
-            executed: output.result.executed,
-            skipped: output.result.skipped,
-            denied: output.result.denied,
-            approval_required: output.result.approval_required,
-            failed: output.result.failed,
-            approved_steps: output.result.approved_steps,
-            dry_run: output.result.dry_run,
-            error: output.result.error,
-        },
-        Err(e) => ApplyResponseV1 {
-            status: "error".to_string(),
-            executed: 0,
-            skipped: 0,
-            denied: 0,
-            approval_required: 0,
-            failed: 0,
-            approved_steps: vec![],
-            dry_run,
-            error: Some(e.to_string()),
-        },
-    };
+    let resp = apply_response_from_core_result(result, dry_run);
     send_json(stream, 200, &resp).await
 }
 
@@ -1383,6 +1390,53 @@ mod tests {
         let json = r#"{"plan_path": "/plan.yml"}"#;
         let req: ApplyRequestV1 = serde_json::from_str(json).unwrap();
         assert!(req.policy_path.is_none()); // will use default
+    }
+
+    #[test]
+    fn test_apply_response_preserves_failed_step_counters() {
+        let output = osai_agent_core::ApplyCoreOutput {
+            authorization: osai_agent_core::ApplyAuthorizationReport {
+                plan_id: "plan-1".to_string(),
+                plan_path: "/tmp/plan.yml".to_string(),
+                policy_path: "/tmp/policy.yml".to_string(),
+                dry_run: false,
+                steps: vec![],
+                denied_count: 0,
+                approval_required_count: 0,
+            },
+            executions: vec![osai_agent_core::ApplyStepExecution {
+                step_id: "step-fails".to_string(),
+                action: "BrowserOpenUrl".to_string(),
+                status: "Failed".to_string(),
+                error: Some("Action is not executable in ToolExecutor v0.1".to_string()),
+                denied: false,
+                approval_skipped: false,
+                approved_by_cli: false,
+            }],
+            result: osai_agent_core::ApplyResult {
+                status: "Failed".to_string(),
+                executed: 0,
+                skipped: 0,
+                denied: 0,
+                approval_required: 0,
+                failed: 1,
+                approved_steps: vec![],
+                dry_run: false,
+                error: Some("1 step(s) failed".to_string()),
+            },
+            receipt_id: Some("receipt-1".to_string()),
+        };
+
+        let resp = apply_response_from_core_result(Ok(output), false);
+
+        assert_eq!(resp.status, "success");
+        assert_eq!(resp.executed, 0);
+        assert_eq!(resp.skipped, 0);
+        assert_eq!(resp.denied, 0);
+        assert_eq!(resp.approval_required, 0);
+        assert_eq!(resp.failed, 1);
+        assert_eq!(resp.error.as_deref(), Some("1 step(s) failed"));
+        assert!(!resp.dry_run);
     }
 
     // ========================================================================

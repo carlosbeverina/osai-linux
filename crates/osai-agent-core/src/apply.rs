@@ -750,11 +750,7 @@ pub fn run_apply_core(
         receipt_id: Some(receipt_id.to_string()),
     };
 
-    if failed_count > 0 {
-        Err(anyhow::anyhow!("{} step(s) failed", failed_count))
-    } else {
-        Ok(output)
-    }
+    Ok(output)
 }
 
 /// Runs an apply operation and prints the legacy CLI output.
@@ -886,6 +882,123 @@ pub fn print_apply_output(output: &ApplyCoreOutput, json: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("osai-core-{}-{}", name, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_failing_browser_plan(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let receipts_dir = dir.join("receipts");
+        let plan_path = dir.join("failing-browser-plan.yml");
+        let policy_path = dir.join("policy.yml");
+
+        std::fs::write(
+            &plan_path,
+            r#"version: "0.1"
+id: "550e8400-e29b-41d4-a716-446655440101"
+title: "Open Unsupported Browser"
+description: "Exercise a step-level executor failure"
+actor: "user"
+risk: Low
+approval: Auto
+steps:
+  - id: "step-fails"
+    action:
+      type: BrowserOpenUrl
+    description: "Attempt browser open"
+    requires_approval: false
+    inputs:
+      url: "https://example.com"
+metadata: {}"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            &policy_path,
+            r#"version: "0.1"
+default_mode: Allow
+action_modes:
+  BrowserOpenUrl: Allow
+allowed_roots: []
+shell_network_allowed: false
+shell_requires_sandbox: true"#,
+        )
+        .unwrap();
+
+        (plan_path, policy_path, receipts_dir)
+    }
+
+    #[test]
+    fn test_run_apply_core_returns_output_for_step_execution_failure() {
+        let dir = unique_test_dir("failed-step-output");
+        let (plan_path, policy_path, receipts_dir) = write_failing_browser_plan(&dir);
+
+        let output = run_apply_core(
+            &plan_path,
+            &policy_path,
+            Some(receipts_dir.as_path()),
+            &[],
+            &[],
+            false,
+            None,
+            false,
+        )
+        .expect("step-level execution failures should be represented in ApplyCoreOutput");
+
+        assert_eq!(output.result.failed, 1);
+        assert_eq!(output.result.status, "Failed");
+        assert_eq!(output.result.error.as_deref(), Some("1 step(s) failed"));
+        assert_eq!(output.executions.len(), 1);
+        assert_eq!(output.executions[0].step_id, "step-fails");
+        assert_eq!(output.executions[0].status, "Failed");
+        assert!(output.executions[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not executable"));
+        assert!(output.receipt_id.is_some());
+
+        let store = ReceiptStore::new(&receipts_dir);
+        let receipts = store.list().unwrap();
+        assert!(
+            receipts.len() >= 2,
+            "expected executor and apply receipts, got {}",
+            receipts.len()
+        );
+    }
+
+    #[test]
+    fn test_run_apply_still_returns_err_for_step_execution_failure() {
+        let dir = unique_test_dir("failed-step-wrapper");
+        let (plan_path, policy_path, receipts_dir) = write_failing_browser_plan(&dir);
+
+        let result = run_apply(
+            &plan_path,
+            &policy_path,
+            Some(receipts_dir.as_path()),
+            &[],
+            &[],
+            false,
+            None,
+            false,
+            false,
+        );
+
+        let err =
+            result.expect_err("legacy apply wrapper should still return Err for failed steps");
+        assert!(err.to_string().contains("1 step(s) failed"));
+
+        let store = ReceiptStore::new(&receipts_dir);
+        let receipts = store.list().unwrap();
+        assert!(
+            receipts.len() >= 2,
+            "expected executor and apply receipts, got {}",
+            receipts.len()
+        );
+    }
 
     #[test]
     fn test_is_path_in_allowed_roots_expands_tilde() {
