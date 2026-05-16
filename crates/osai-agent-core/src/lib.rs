@@ -10,10 +10,11 @@ pub mod runtime;
 pub mod shared;
 
 pub use apply::{
-    authorize_plan_preview, run_apply, ApplyResult, AuthorizePreviewResult, AuthorizeSummary,
-    StepPreview,
+    authorize_plan_preview, print_apply_output, run_apply, run_apply_core,
+    ApplyAuthorizationReport, ApplyCoreOutput, ApplyResult, ApplyStepAuthorization,
+    ApplyStepExecution, AuthorizePreviewResult, AuthorizeSummary, StepPreview,
 };
-pub use ask::{ask_core_async, run_ask, AskResult};
+pub use ask::{ask_core, ask_core_async, run_ask, AskResult};
 pub use chat::{chat_core_async, run_chat, ChatResult};
 pub use runtime::{
     check_llamacpp_status, check_model_router_status, check_osai_api_status,

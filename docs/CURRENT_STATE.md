@@ -13,7 +13,7 @@ This document describes what is currently implemented and validated in the OSAI 
 | `osai-toolbroker` | ✅ | Authorization layer, policy evaluation, decision logging |
 | `osai-tool-executor` | ✅ | Action execution for supported tools |
 | `osai-receipt-logger` | ✅ | Receipt storage, list, read, secret redaction |
-| `osai-agent-core` | ⚠️ | (Partially extracted — chat.rs, ask.rs, apply.rs, runtime.rs, shared.rs; extraction ongoing) |
+| `osai-agent-core` | ✅ | Shared chat, ask/plan generation, apply authorization/execution, runtime status, and shared helper APIs used by CLI and API |
 
 ## Model Router
 

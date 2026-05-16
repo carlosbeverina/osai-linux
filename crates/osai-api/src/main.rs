@@ -698,7 +698,7 @@ async fn handle_apply(stream: &mut tokio::net::TcpStream, body: &[u8]) -> anyhow
         .map(PathBuf::from)
         .collect();
 
-    let result = osai_agent_core::run_apply(
+    let result = osai_agent_core::run_apply_core(
         &plan_path,
         &policy_path,
         Some(&receipts_path),
@@ -707,20 +707,19 @@ async fn handle_apply(stream: &mut tokio::net::TcpStream, body: &[u8]) -> anyhow
         req.approve_all.unwrap_or(false),
         req.model_router_url.as_deref(),
         dry_run,
-        false,
     );
 
     let resp = match result {
-        Ok(()) => ApplyResponseV1 {
+        Ok(output) => ApplyResponseV1 {
             status: "success".to_string(),
-            executed: 0,
-            skipped: 0,
-            denied: 0,
-            approval_required: 0,
-            failed: 0,
-            approved_steps: vec![],
-            dry_run,
-            error: None,
+            executed: output.result.executed,
+            skipped: output.result.skipped,
+            denied: output.result.denied,
+            approval_required: output.result.approval_required,
+            failed: output.result.failed,
+            approved_steps: output.result.approved_steps,
+            dry_run: output.result.dry_run,
+            error: output.result.error,
         },
         Err(e) => ApplyResponseV1 {
             status: "error".to_string(),

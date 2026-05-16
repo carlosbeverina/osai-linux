@@ -19,11 +19,11 @@ osai-agent-core extraction is the first engineering task after documentation. Th
 
 A Rust library crate (`crates/osai-agent-core/`) containing:
 
-- Chat logic (`chat_core_async`)
-- Ask/plan generation logic (`ask_core_async`)
-- Apply logic (`run_apply`)
+- Chat logic (`chat_core`, `chat_core_async`)
+- Ask/plan generation logic (`ask_core`, `ask_core_async`)
+- Apply logic (`run_apply_core`, with `run_apply` kept as a legacy-compatible printing wrapper)
 - Runtime status collection (`collect_runtime_status_async`)
-- Shared types (ChatResult, AskResult, etc.)
+- Shared types (`ChatResult`, `AskResult`, `ApplyCoreOutput`, `ApplyResult`, etc.)
 
 ## What Stays in osai-agent-cli
 
@@ -65,18 +65,17 @@ pub async fn ask_core_async(
     temperature: f32,
 ) -> Result<AskResult>
 
-// run_apply — handles validate, authorize, apply flow
-pub fn run_apply(
-    plan_path: &Path,
-    policy_path: &Path,
+// run_apply_core — handles validate, authorize, apply flow and returns data only
+pub fn run_apply_core(
+    plan_path: &PathBuf,
+    policy_path: &PathBuf,
     receipts_dir: Option<&Path>,
     allowed_roots: &[PathBuf],
     approve: &[String],
     approve_all: bool,
     model_router_url: Option<&str>,
     dry_run: bool,
-    force_no_approve: bool,
-) -> Result<()>
+) -> Result<ApplyCoreOutput>
 ```
 
 ### From osai-agent-core/src/runtime.rs (already exists)
@@ -98,12 +97,18 @@ pub struct ChatResult {
 
 pub struct AskResult {
     pub status: String,
-    pub output_path: Option<PathBuf>,
+    pub output_path: Option<String>,
     pub validation: String,
     pub error: Option<String>,
+    pub yaml_output: Option<String>,
 }
 
-// ApplyResult via direct execution, no separate struct
+pub struct ApplyCoreOutput {
+    pub authorization: ApplyAuthorizationReport,
+    pub executions: Vec<ApplyStepExecution>,
+    pub result: ApplyResult,
+    pub receipt_id: Option<String>,
+}
 ```
 
 ## Proposed API
@@ -223,7 +228,7 @@ cargo run -p osai-agent-cli -- ask --print-plan "test"
 3. **Tests pass** — `cargo test --workspace` passes
 4. **Clean API** — osai-agent-core exports clear public functions
 5. **No behavior change** — This is a refactor, not a feature change
-6. **osai-api can use it** — Future osai-api will call osai-agent-core, not shell out
+6. **osai-api can use it** — osai-api calls osai-agent-core for chat, ask, authorize preview, apply, and runtime status without shelling out
 
 ## What Not to Do
 

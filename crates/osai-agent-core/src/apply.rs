@@ -57,6 +57,49 @@ pub struct AuthorizeSummary {
     pub approval_required: u32,
 }
 
+/// Authorization summary emitted before execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyAuthorizationReport {
+    pub plan_id: String,
+    pub plan_path: String,
+    pub policy_path: String,
+    pub dry_run: bool,
+    pub steps: Vec<ApplyStepAuthorization>,
+    pub denied_count: u32,
+    pub approval_required_count: u32,
+}
+
+/// Authorization details for one apply step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyStepAuthorization {
+    pub step_id: String,
+    pub action: String,
+    pub allowed: bool,
+    pub approval: bool,
+    pub mode: String,
+}
+
+/// Execution status emitted for one apply step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyStepExecution {
+    pub step_id: String,
+    pub action: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub denied: bool,
+    pub approval_skipped: bool,
+    pub approved_by_cli: bool,
+}
+
+/// Complete core apply output. Contains data only; callers own presentation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyCoreOutput {
+    pub authorization: ApplyAuthorizationReport,
+    pub executions: Vec<ApplyStepExecution>,
+    pub result: ApplyResult,
+    pub receipt_id: Option<String>,
+}
+
 // ============================================================================
 // Authorization Preview (no execution)
 // ============================================================================
@@ -97,15 +140,15 @@ fn is_path_in_allowed_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {
             root.clone()
         };
 
-        // Canonicalize the root (root should exist as it's provided by caller)
-        let canonical_root = match std::fs::canonicalize(&expanded_root) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+        // Canonicalize the root when possible. If the root does not exist yet,
+        // fall back to normalized prefix comparison below so callers can allow
+        // conventional paths like ~/Downloads in clean test/dev environments.
+        let canonical_root = std::fs::canonicalize(&expanded_root).ok();
 
-        // If we have a canonical path (path exists), do precise comparison
-        if let Some(cp) = &canonical_path {
-            if cp.starts_with(&canonical_root) {
+        // If we have a canonical path (path exists), do precise comparison when
+        // the root also canonicalized.
+        if let (Some(cp), Some(root)) = (&canonical_path, &canonical_root) {
+            if cp.starts_with(root) {
                 return true;
             }
             continue;
@@ -121,12 +164,18 @@ fn is_path_in_allowed_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {
 
         // Normalize the path by resolving .. components and comparing prefixes
         let normalized = normalize_path_for_prefix_check(&expanded_path);
-        let canonical_root_str = canonical_root.to_string_lossy();
 
         // Normalize the root for comparison too
         let normalized_root = normalize_path_for_prefix_check(&expanded_root);
+        let canonical_root_str = canonical_root
+            .as_ref()
+            .map(|root| root.to_string_lossy().to_string());
 
-        if normalized.starts_with(&normalized_root) || normalized.starts_with(&*canonical_root_str)
+        if normalized.starts_with(&normalized_root)
+            || canonical_root_str
+                .as_deref()
+                .map(|root| normalized.starts_with(root))
+                .unwrap_or(false)
         {
             return true;
         }
@@ -352,7 +401,7 @@ fn write_apply_receipt(
     failed_count: u32,
     status: &str,
     error: Option<&str>,
-) -> Result<()> {
+) -> Result<uuid::Uuid> {
     let store = ReceiptStore::new(receipts_dir);
     store
         .ensure_dirs()
@@ -394,15 +443,12 @@ fn write_apply_receipt(
         .write(&receipt)
         .map_err(|e| anyhow::anyhow!("failed to write receipt: {}", e))?;
 
-    if !dry_run {
-        println!("Receipt written: {}", receipt_id);
-    }
-
-    Ok(())
+    Ok(receipt_id)
 }
 
-/// Runs an apply operation - validates, authorizes, and executes an OSAI plan.
-pub fn run_apply(
+/// Runs the core apply operation without printing. This is the reusable business
+/// logic used by CLI/API callers; presentation belongs to the caller.
+pub fn run_apply_core(
     plan_path: &PathBuf,
     policy_path: &PathBuf,
     receipts_dir_override: Option<&Path>,
@@ -411,8 +457,7 @@ pub fn run_apply(
     approve_all: bool,
     model_router_url: Option<&str>,
     dry_run: bool,
-    json: bool,
-) -> Result<()> {
+) -> Result<ApplyCoreOutput> {
     // Resolve receipts directory
     let receipts_dir = receipts_dir_override
         .map(|p| p.to_path_buf())
@@ -427,9 +472,9 @@ pub fn run_apply(
             .with_context(|| format!("failed to parse plan file: {}", plan_path.display()))?,
     };
 
-    // Validate plan
+    // Validate plan before any authorization/execution.
     if let Err(e) = plan.validate() {
-        write_apply_receipt(
+        let _receipt_id = write_apply_receipt(
             &receipts_dir,
             &plan,
             plan_path,
@@ -465,7 +510,8 @@ pub fn run_apply(
     })?;
     let broker = ToolBroker::new(policy.clone(), store.clone());
 
-    // Authorize each step and collect decisions
+    // Authorize each step and collect decisions. ToolBroker remains the
+    // authorization boundary; execution below only uses authorized decisions.
     let mut denied_count = 0u32;
     let mut approval_required_count = 0u32;
     let mut approved_step_ids = Vec::new();
@@ -487,81 +533,44 @@ pub fn run_apply(
             .with_context(|| format!("authorization failed for step: {}", step.id))?;
 
         let action_name = request.action_name();
-        decisions.push(StepDecision {
-            step_id: step.id.clone(),
-            action_name: action_name.clone(),
-            allowed: decision.allowed,
-            requires_approval: decision.requires_user_approval,
-            policy_mode: decision.policy_mode,
-            reason: decision.reason,
-        });
-
         if !decision.allowed {
             denied_count += 1;
         }
         if decision.requires_user_approval {
             approval_required_count += 1;
         }
+        decisions.push(StepDecision {
+            step_id: step.id.clone(),
+            action_name,
+            allowed: decision.allowed,
+            requires_approval: decision.requires_user_approval,
+            policy_mode: decision.policy_mode,
+            reason: decision.reason,
+        });
     }
 
-    // Print authorization summary
-    if json {
-        #[derive(Serialize)]
-        struct ApplyAuthorizationSummary {
-            plan_id: String,
-            plan_path: String,
-            policy_path: String,
-            dry_run: bool,
-            steps: Vec<StepAuthorizationSummary>,
-            denied_count: u32,
-            approval_required_count: u32,
-        }
-        #[derive(Serialize)]
-        struct StepAuthorizationSummary {
-            step_id: String,
-            action: String,
-            allowed: bool,
-            approval: bool,
-            mode: String,
-        }
-        let step_summaries: Vec<StepAuthorizationSummary> = decisions
+    let authorization = ApplyAuthorizationReport {
+        plan_id: plan.id.to_string(),
+        plan_path: plan_path.display().to_string(),
+        policy_path: policy_path.display().to_string(),
+        dry_run,
+        steps: decisions
             .iter()
-            .map(|d| StepAuthorizationSummary {
+            .map(|d| ApplyStepAuthorization {
                 step_id: d.step_id.clone(),
                 action: d.action_name.clone(),
                 allowed: d.allowed,
                 approval: d.requires_approval,
                 mode: format!("{:?}", d.policy_mode),
             })
-            .collect();
-        let summary = ApplyAuthorizationSummary {
-            plan_id: plan.id.to_string(),
-            plan_path: plan_path.display().to_string(),
-            policy_path: policy_path.display().to_string(),
-            dry_run,
-            steps: step_summaries,
-            denied_count,
-            approval_required_count,
-        };
-        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
-    } else {
-        println!("Authorization summary for plan: {}", plan_path.display());
-        println!("policy: {}", policy_path.display());
-        for d in &decisions {
-            println!(
-                "step={} action={} allowed={} approval={} mode={:?}",
-                d.step_id, d.action_name, d.allowed, d.requires_approval, d.policy_mode
-            );
-        }
-        println!(
-            "denied={} approval_required={}",
-            denied_count, approval_required_count
-        );
-    }
+            .collect(),
+        denied_count,
+        approval_required_count,
+    };
 
-    // Dry run: write receipt and exit
+    // Dry run: receipt only, no ToolExecutor invocation.
     if dry_run {
-        write_apply_receipt(
+        let receipt_id = write_apply_receipt(
             &receipts_dir,
             &plan,
             plan_path,
@@ -578,11 +587,25 @@ pub fn run_apply(
             "Executed",
             None,
         )?;
-        println!("Dry run complete; no steps executed.");
-        return Ok(());
+        return Ok(ApplyCoreOutput {
+            authorization,
+            executions: Vec::new(),
+            result: ApplyResult {
+                status: "Executed".to_string(),
+                executed: 0,
+                skipped: 0,
+                denied: denied_count,
+                approval_required: approval_required_count,
+                failed: 0,
+                approved_steps: Vec::new(),
+                dry_run,
+                error: None,
+            },
+            receipt_id: Some(receipt_id.to_string()),
+        });
     }
 
-    // Build ToolExecutor with optional model router URL
+    // Build ToolExecutor with optional model router URL.
     let mut executor = ToolExecutor::new(store, allowed_root.to_vec());
     if let Some(url) = model_router_url {
         executor = executor
@@ -590,107 +613,66 @@ pub fn run_apply(
             .map_err(|e| anyhow::anyhow!("invalid model router URL: {}", e))?;
     }
 
-    // Execute steps
     let mut executed_count = 0u32;
     let mut skipped_count = 0u32;
     let mut failed_count = 0u32;
+    let mut executions = Vec::new();
     let approve_set: std::collections::HashSet<&str> = approve.iter().map(|s| s.as_str()).collect();
 
     for (i, step) in plan.steps.iter().enumerate() {
         let decision = &decisions[i];
 
         if !decision.allowed {
-            if json {
-                println!(
-                    "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"Denied\"}}",
-                    decision.step_id, decision.action_name
-                );
-            } else {
-                println!(
-                    "step={} action={} execution=Denied reason=\"Policy denied\"",
-                    decision.step_id, decision.action_name
-                );
-            }
+            executions.push(ApplyStepExecution {
+                step_id: decision.step_id.clone(),
+                action: decision.action_name.clone(),
+                status: "Denied".to_string(),
+                error: Some("Policy denied".to_string()),
+                denied: true,
+                approval_skipped: false,
+                approved_by_cli: false,
+            });
             skipped_count += 1;
             continue;
         }
 
-        if decision.requires_approval {
+        let mut approved_by_cli = false;
+        let auth_decision = if decision.requires_approval {
             let is_approved = approve_all || approve_set.contains(decision.step_id.as_str());
             if !is_approved {
-                if json {
-                    println!(
-                        "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"Skipped\",\"reason\":\"requires approval\"}}",
-                        decision.step_id, decision.action_name
-                    );
-                } else {
-                    println!(
-                        "step={} action={} execution=Skipped reason=\"requires user approval\"",
-                        decision.step_id, decision.action_name
-                    );
-                }
+                executions.push(ApplyStepExecution {
+                    step_id: decision.step_id.clone(),
+                    action: decision.action_name.clone(),
+                    status: "Skipped".to_string(),
+                    error: Some("requires user approval".to_string()),
+                    denied: false,
+                    approval_skipped: true,
+                    approved_by_cli: false,
+                });
                 skipped_count += 1;
                 continue;
             }
-            // Explicitly approved
-            let adjusted_decision = osai_toolbroker::AuthorizationDecision {
+            approved_by_cli = true;
+            osai_toolbroker::AuthorizationDecision {
                 allowed: true,
                 requires_user_approval: false,
                 reason: format!("Explicitly approved by CLI: {}", decision.reason),
                 policy_mode: decision.policy_mode,
                 request_id: uuid::Uuid::new_v4(),
-            };
-
-            let request = step_to_request(&plan, step);
-            let result = executor
-                .execute_authorized(&request, &adjusted_decision)
-                .with_context(|| format!("execution failed for step: {}", step.id))?;
-
-            let exec_status = match result.status {
-                ExecutionStatus::Executed => "Executed",
-                ExecutionStatus::Failed => "Failed",
-                ExecutionStatus::Skipped => "Skipped",
-            };
-            if json {
-                println!(
-                    "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"{}\",\"error\":\"{}\"}}",
-                    decision.step_id,
-                    decision.action_name,
-                    exec_status,
-                    result.error.unwrap_or_default()
-                );
-            } else {
-                println!(
-                    "step={} action={} execution={} error=\"{}\"",
-                    decision.step_id,
-                    decision.action_name,
-                    exec_status,
-                    result.error.unwrap_or_default()
-                );
             }
-
-            if result.status == ExecutionStatus::Executed {
-                executed_count += 1;
-                approved_step_ids.push(decision.step_id.clone());
-            } else if result.status == ExecutionStatus::Failed {
-                failed_count += 1;
-            } else {
-                skipped_count += 1;
+        } else {
+            osai_toolbroker::AuthorizationDecision {
+                allowed: decision.allowed,
+                requires_user_approval: decision.requires_approval,
+                reason: decision.reason.clone(),
+                policy_mode: decision.policy_mode,
+                request_id: uuid::Uuid::new_v4(),
             }
-            continue;
-        }
-
-        // Execute auto-approved step
-        let request = step_to_request(&plan, step);
-        let auto_decision = osai_toolbroker::AuthorizationDecision {
-            allowed: decision.allowed,
-            requires_user_approval: decision.requires_approval,
-            reason: decision.reason.clone(),
-            policy_mode: decision.policy_mode,
-            request_id: uuid::Uuid::new_v4(),
         };
+
+        let request = step_to_request(&plan, step);
         let result = executor
-            .execute_authorized(&request, &auto_decision)
+            .execute_authorized(&request, &auth_decision)
             .with_context(|| format!("execution failed for step: {}", step.id))?;
 
         let exec_status = match result.status {
@@ -698,26 +680,22 @@ pub fn run_apply(
             ExecutionStatus::Failed => "Failed",
             ExecutionStatus::Skipped => "Skipped",
         };
-        if json {
-            println!(
-                "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"{}\",\"error\":\"{}\"}}",
-                decision.step_id,
-                decision.action_name,
-                exec_status,
-                result.error.unwrap_or_default()
-            );
-        } else {
-            println!(
-                "step={} action={} execution={} error=\"{}\"",
-                decision.step_id,
-                decision.action_name,
-                exec_status,
-                result.error.unwrap_or_default()
-            );
-        }
+        let error = result.error.unwrap_or_default();
+        executions.push(ApplyStepExecution {
+            step_id: decision.step_id.clone(),
+            action: decision.action_name.clone(),
+            status: exec_status.to_string(),
+            error: if error.is_empty() { None } else { Some(error) },
+            denied: false,
+            approval_skipped: false,
+            approved_by_cli,
+        });
 
         if result.status == ExecutionStatus::Executed {
             executed_count += 1;
+            if approved_by_cli {
+                approved_step_ids.push(decision.step_id.clone());
+            }
         } else if result.status == ExecutionStatus::Failed {
             failed_count += 1;
         } else {
@@ -725,7 +703,6 @@ pub fn run_apply(
         }
     }
 
-    // Write receipt
     let status = if failed_count > 0 {
         "Failed"
     } else {
@@ -736,8 +713,7 @@ pub fn run_apply(
     } else {
         None
     };
-    let error: Option<&str> = error_msg.as_deref();
-    write_apply_receipt(
+    let receipt_id = write_apply_receipt(
         &receipts_dir,
         &plan,
         plan_path,
@@ -752,44 +728,154 @@ pub fn run_apply(
         approval_required_count,
         failed_count,
         status,
-        error,
+        error_msg.as_deref(),
     )?;
 
-    // Print summary
-    if json {
-        #[derive(Serialize)]
-        struct ApplySummary {
-            status: String,
-            executed: u32,
-            skipped: u32,
-            denied: u32,
-            approval_required: u32,
-            failed: u32,
-            approved_steps: Vec<String>,
-            dry_run: bool,
-        }
-        let summary = ApplySummary {
-            status: status.to_string(),
-            executed: executed_count,
-            skipped: skipped_count,
-            denied: denied_count,
-            approval_required: approval_required_count,
-            failed: failed_count,
-            approved_steps: approved_step_ids,
-            dry_run,
-        };
-        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
-    } else {
-        println!(
-            "Apply complete: executed={} skipped={} denied={} approval_required={} failed={}",
-            executed_count, skipped_count, denied_count, approval_required_count, failed_count
-        );
-    }
+    let result = ApplyResult {
+        status: status.to_string(),
+        executed: executed_count,
+        skipped: skipped_count,
+        denied: denied_count,
+        approval_required: approval_required_count,
+        failed: failed_count,
+        approved_steps: approved_step_ids,
+        dry_run,
+        error: error_msg.clone(),
+    };
+
+    let output = ApplyCoreOutput {
+        authorization,
+        executions,
+        result,
+        receipt_id: Some(receipt_id.to_string()),
+    };
 
     if failed_count > 0 {
         Err(anyhow::anyhow!("{} step(s) failed", failed_count))
     } else {
+        Ok(output)
+    }
+}
+
+/// Runs an apply operation and prints the legacy CLI output.
+pub fn run_apply(
+    plan_path: &PathBuf,
+    policy_path: &PathBuf,
+    receipts_dir_override: Option<&Path>,
+    allowed_root: &[PathBuf],
+    approve: &[String],
+    approve_all: bool,
+    model_router_url: Option<&str>,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    let output = run_apply_core(
+        plan_path,
+        policy_path,
+        receipts_dir_override,
+        allowed_root,
+        approve,
+        approve_all,
+        model_router_url,
+        dry_run,
+    )?;
+
+    print_apply_output(&output, json);
+
+    if output.result.failed > 0 {
+        Err(anyhow::anyhow!("{} step(s) failed", output.result.failed))
+    } else {
         Ok(())
+    }
+}
+
+/// Prints apply output in the historical CLI format.
+pub fn print_apply_output(output: &ApplyCoreOutput, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output.authorization).unwrap()
+        );
+    } else {
+        println!(
+            "Authorization summary for plan: {}",
+            output.authorization.plan_path
+        );
+        println!("policy: {}", output.authorization.policy_path);
+        for d in &output.authorization.steps {
+            println!(
+                "step={} action={} allowed={} approval={} mode={}",
+                d.step_id, d.action, d.allowed, d.approval, d.mode
+            );
+        }
+        println!(
+            "denied={} approval_required={}",
+            output.authorization.denied_count, output.authorization.approval_required_count
+        );
+    }
+
+    if output.result.dry_run {
+        println!("Dry run complete; no steps executed.");
+        return;
+    }
+
+    for e in &output.executions {
+        if json {
+            if e.denied {
+                println!(
+                    "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"Denied\"}}",
+                    e.step_id, e.action
+                );
+            } else if e.approval_skipped {
+                println!(
+                    "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"Skipped\",\"reason\":\"requires approval\"}}",
+                    e.step_id, e.action
+                );
+            } else {
+                println!(
+                    "{{\"step\":\"{}\",\"action\":\"{}\",\"status\":\"{}\",\"error\":\"{}\"}}",
+                    e.step_id,
+                    e.action,
+                    e.status,
+                    e.error.clone().unwrap_or_default()
+                );
+            }
+        } else if e.denied {
+            println!(
+                "step={} action={} execution=Denied reason=\"Policy denied\"",
+                e.step_id, e.action
+            );
+        } else if e.approval_skipped {
+            println!(
+                "step={} action={} execution=Skipped reason=\"requires user approval\"",
+                e.step_id, e.action
+            );
+        } else {
+            println!(
+                "step={} action={} execution={} error=\"{}\"",
+                e.step_id,
+                e.action,
+                e.status,
+                e.error.clone().unwrap_or_default()
+            );
+        }
+    }
+
+    if let Some(receipt_id) = &output.receipt_id {
+        println!("Receipt written: {}", receipt_id);
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output.result).unwrap());
+    } else {
+        println!(
+            "Apply complete: executed={} skipped={} denied={} approval_required={} failed={}",
+            output.result.executed,
+            output.result.skipped,
+            output.result.denied,
+            output.result.approval_required,
+            output.result.failed
+        );
     }
 }
 
@@ -817,9 +903,6 @@ mod tests {
 
     #[test]
     fn test_is_path_in_allowed_roots_tilde_in_allowed_root() {
-        let home = std::env::var("HOME").unwrap();
-        let home_path = PathBuf::from(&home);
-
         // ~/Downloads with tilde in allowed root
         let path = PathBuf::from("~/Downloads");
         let allowed = vec![PathBuf::from("~/Downloads")];

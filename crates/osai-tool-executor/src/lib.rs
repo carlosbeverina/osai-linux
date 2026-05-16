@@ -95,7 +95,10 @@ impl ToolExecutor {
             receipt_store,
             allowed_roots,
             model_router_url: None,
-            http_client: reqwest::blocking::Client::new(),
+            http_client: reqwest::blocking::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("failed to build loopback-only HTTP client"),
         }
     }
 
