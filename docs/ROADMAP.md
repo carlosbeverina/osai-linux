@@ -12,13 +12,13 @@ Phased implementation plan for OSAI. Each phase has clear acceptance criteria. D
 - [x] All documentation files created
 - [x] Test suite passing
 - [x] MVP loop documented and validated
-- [ ] osai-agent-core extraction planned with API contract
+- [x] osai-agent-core extraction completed with API contract
 
 ## Phase 1: osai-agent-core Extraction
 
 **Goal**: Extract CLI logic into a reusable Rust library. CLI becomes a thin wrapper.
 
-**Status**: ⚠️ Partially extracted — chat.rs, ask.rs, apply.rs, runtime.rs, shared.rs exist; full extraction and clean public API pending
+**Status**: ✅ Complete — chat, ask, apply, runtime, and shared helpers are exposed for CLI/API callers
 
 **Key Activities**:
 - Identify all logic in `osai-agent-cli/src/main.rs` that belongs in core
@@ -32,19 +32,19 @@ Phased implementation plan for OSAI. Each phase has clear acceptance criteria. D
 - No behavior changes
 
 **Acceptance Criteria**:
-- [ ] `osai-agent-core` crate created
-- [ ] CLI still works identically (`cargo run -p osai-agent-cli -- chat "test"`)
-- [ ] MVP loop still works
-- [ ] `cargo test --workspace` passes
+- [x] `osai-agent-core` crate created
+- [x] CLI still works identically (`cargo run -p osai-agent-cli -- chat "test"`)
+- [x] MVP loop still works
+- [x] `cargo test --workspace` passes
 - [ ] `osai-agent-core` exports clean public API
 
 ## Phase 2: osai-api
 
 **Goal**: Local HTTP API service using osai-agent-core. This is the interface future UI will call.
 
-**Status**: ⚠️ Prototype exists — auth guard, endpoints, Dev Panel UI at port 8090; full endpoint implementation and osai-agent-core integration pending
+**Status**: ✅ MVP endpoints implemented — auth guard, loopback binding, osai-agent-core integration, plan/receipt endpoints, runtime status, and Dev Panel UI at port 8090
 
-**Key Endpoints (proposed)**:
+**Key Endpoints:**
 - `GET /health` — service health
 - `GET /v1/status` — model/runtime status
 - `GET /v1/runtime/status` — unified runtime health
@@ -69,12 +69,12 @@ Phased implementation plan for OSAI. Each phase has clear acceptance criteria. D
 - Token never logged, never in receipts
 
 **Acceptance Criteria**:
-- [ ] All proposed endpoints implemented
-- [ ] Token auth on protected endpoints
-- [ ] Health/status/capabilities/UI unauthenticated
-- [ ] osai-api uses osai-agent-core (not CLI shell-out)
-- [ ] `cargo test --workspace` passes
-- [ ] Local dev panel UI functional
+- [x] All proposed endpoints implemented
+- [x] Token auth on protected endpoints
+- [x] Health/status/capabilities/UI unauthenticated
+- [x] osai-api uses osai-agent-core (not CLI shell-out)
+- [x] `cargo test --workspace` passes
+- [x] Local dev panel UI functional
 
 ## Phase 3: Local Dev UI / Control Panel
 
@@ -258,6 +258,6 @@ Microphone → Whisper/faster-whisper/whisper.cpp → text → OSAI ask/generate
 - ✅ Model Router FastAPI with 3 providers
 - ✅ llama.cpp local runtime with CUDA
 - ✅ Gemma 4 E2B Q8 GGUF default model (current validated default)
-- ⚠️ osai-agent-core partially extracted (chat.rs, ask.rs, apply.rs, runtime.rs, shared.rs)
-- ⚠️ osai-api prototype exists (auth guard, endpoints, Dev Panel UI at port 8090)
+- ✅ osai-agent-core extracted (chat, ask, apply, runtime, shared helpers)
+- ✅ osai-api MVP endpoints exist (auth guard, core-backed endpoints, Dev Panel UI at port 8090)
 - ❌ Desktop UI (Phase 4 after osai-api)

@@ -89,8 +89,51 @@ fn is_path_under_dir(path: &Path, parent_dir: &Path) -> bool {
     canonical_path.starts_with(&canonical_parent)
 }
 
+fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    let mut normalized = PathBuf::new();
+    for component in abs.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn is_path_under_dir_allow_missing(path: &Path, parent_dir: &Path) -> bool {
+    if let (Ok(canonical_path), Ok(canonical_parent)) = (
+        std::fs::canonicalize(path),
+        std::fs::canonicalize(parent_dir),
+    ) {
+        return canonical_path.starts_with(canonical_parent);
+    }
+
+    let normalized_path = normalize_path_for_prefix_check(path);
+    let normalized_parent = normalize_path_for_prefix_check(parent_dir);
+    normalized_path.starts_with(normalized_parent)
+}
+
 /// List plans in a directory.
 pub fn list_plans(dir: &Path, limit: usize) -> Result<PlansListResponse> {
+    let default_dir = default_plans_dir();
+    if !is_path_under_dir_allow_missing(dir, &default_dir) {
+        return Err(anyhow::anyhow!(
+            "path is outside allowed plans directory: {}",
+            dir.display()
+        ));
+    }
+
     let plans_dir = dir.display().to_string();
 
     if !dir.exists() {

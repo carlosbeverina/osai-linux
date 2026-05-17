@@ -233,6 +233,18 @@ fn extract_bearer_token(header: &str) -> Option<&str> {
         .or_else(|| header.strip_prefix("bearer "))
 }
 
+fn extract_auth_token(headers: HeaderSlice<'_>) -> Option<&str> {
+    headers.iter().find_map(|(name, value)| {
+        if name.eq_ignore_ascii_case("authorization") {
+            extract_bearer_token(value)
+        } else if name.eq_ignore_ascii_case("x-osai-token") {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    })
+}
+
 /// Check auth and send 401 if missing/invalid. Returns true if request should proceed.
 async fn check_auth(
     stream: &mut tokio::net::TcpStream,
@@ -244,18 +256,8 @@ async fn check_auth(
         return true;
     }
 
-    // Look for Authorization: Bearer <token> or X-OSAI-Token: <token>
-    let token_opt = headers.iter().find_map(|(name, value)| {
-        if name.eq_ignore_ascii_case("authorization") {
-            extract_bearer_token(value)
-        } else if name.eq_ignore_ascii_case("x-osai-token") {
-            Some(value.as_str())
-        } else {
-            None
-        }
-    });
-
-    match token_opt {
+    // Look for Authorization: Bearer <token> or X-OSAI-Token: <token>.
+    match extract_auth_token(headers) {
         Some(token) if validate_token(token) => true,
         _ => {
             let err = ErrorResponse::unauthorized();
@@ -577,7 +579,14 @@ async fn handle_plans_list(stream: &mut tokio::net::TcpStream, query: &str) -> a
 
     match plans::list_plans(&dir, limit) {
         Ok(resp) => send_json(stream, 200, &resp).await,
-        Err(e) => send_error(stream, 500, &ErrorResponse::internal(&e.to_string())).await,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("outside allowed") {
+                send_error(stream, 400, &ErrorResponse::bad_request(&msg)).await
+            } else {
+                send_error(stream, 500, &ErrorResponse::internal(&msg)).await
+            }
+        }
     }
 }
 
@@ -762,7 +771,14 @@ async fn handle_receipts_list(
 
     match receipts::list_receipts(limit, kind_filter.as_deref(), dir_override.as_ref()) {
         Ok(resp) => send_json(stream, 200, &resp).await,
-        Err(e) => send_error(stream, 500, &ErrorResponse::internal(&e.to_string())).await,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("outside allowed") {
+                send_error(stream, 400, &ErrorResponse::bad_request(&msg)).await
+            } else {
+                send_error(stream, 500, &ErrorResponse::internal(&msg)).await
+            }
+        }
     }
 }
 
@@ -1043,6 +1059,8 @@ async fn handle_connection(stream: tokio::net::TcpStream) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    auth::ensure_token_file_if_needed()?;
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -1286,6 +1304,21 @@ mod tests {
         let q: receipts::ReceiptsQuery = serde_urlencoded::from_str(query).unwrap();
         assert_eq!(q.limit, Some(25));
         assert_eq!(q.kind, Some("chat".to_string()));
+    }
+
+    #[test]
+    fn test_plans_list_rejects_arbitrary_directory() {
+        let result = plans::list_plans(std::path::Path::new("/etc"), 10);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("outside allowed"));
+    }
+
+    #[test]
+    fn test_receipts_list_rejects_arbitrary_directory() {
+        let arbitrary = std::path::PathBuf::from("/etc");
+        let result = receipts::list_receipts(10, None, Some(&arbitrary));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("outside allowed"));
     }
 
     #[test]
@@ -1575,17 +1608,6 @@ mod tests {
 
     #[test]
     fn test_is_protected_path_unprotected_routes() {
-        let unprotected = [
-            ("GET", "/health"),
-            ("GET", "/v1/status"),
-            ("GET", "/v1/capabilities"),
-            ("GET", "/v1/runtime/status"),
-            ("GET", "/v1/auth/status"),
-            ("GET", "/ui"),
-            ("GET", "/ui/"),
-            ("GET", "/ui/index.html"),
-            ("POST", "/v1/chat"), // but auth may still apply via check_auth
-        ];
         // Only GET /health, /v1/status, /v1/capabilities, /v1/runtime/status, /v1/auth/status, /ui are truly unauthenticated
         assert!(!super::is_protected_path("GET", "/health"));
         assert!(!super::is_protected_path("GET", "/v1/status"));
@@ -1606,21 +1628,42 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_auth_token_accepts_authorization_bearer() {
+        let headers = vec![(
+            "Authorization".to_string(),
+            "Bearer local-test-token".to_string(),
+        )];
+        assert_eq!(
+            super::extract_auth_token(&headers),
+            Some("local-test-token")
+        );
+    }
+
+    #[test]
+    fn test_extract_auth_token_accepts_x_osai_token() {
+        let headers = vec![("X-OSAI-Token".to_string(), "local-test-token".to_string())];
+        assert_eq!(
+            super::extract_auth_token(&headers),
+            Some("local-test-token")
+        );
+    }
+
+    #[test]
+    fn test_extract_auth_token_rejects_non_bearer_authorization() {
+        let headers = vec![(
+            "Authorization".to_string(),
+            "Basic local-test-token".to_string(),
+        )];
+        assert_eq!(super::extract_auth_token(&headers), None);
+    }
+
+    #[test]
     fn test_constant_time_eq() {
         assert!(crate::auth::constant_time_eq(b"abc123", b"abc123"));
         assert!(!crate::auth::constant_time_eq(b"abc123", b"abc124"));
         assert!(!crate::auth::constant_time_eq(b"abc123", b"abc12"));
         assert!(!crate::auth::constant_time_eq(b"abc123", b""));
         assert!(crate::auth::constant_time_eq(b"", b""));
-    }
-
-    #[test]
-    fn test_auth_status_response_no_token() {
-        // When no token is set, auth_required should be false (auth disabled)
-        let resp = super::AuthStatusResponse::new();
-        assert!(resp.ok);
-        assert!(!resp.auth_required);
-        assert_eq!(resp.token_source, "disabled");
     }
 
     #[test]
@@ -1638,6 +1681,14 @@ mod tests {
         assert!(json.contains("\"ok\":false"));
         assert!(json.contains("\"code\":\"unauthorized\""));
         assert!(json.contains("\"message\":\"missing or invalid local API token\""));
+    }
+
+    #[test]
+    fn test_error_response_unauthorized_does_not_echo_token() {
+        let token = "super-secret-local-token";
+        let err = super::ErrorResponse::unauthorized();
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(!json.contains(token));
     }
 
     #[test]

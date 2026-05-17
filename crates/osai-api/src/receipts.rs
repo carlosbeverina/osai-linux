@@ -120,6 +120,40 @@ fn is_path_under_any_dir(path: &Path, allowed_parents: &[PathBuf]) -> bool {
     false
 }
 
+fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    let mut normalized = PathBuf::new();
+    for component in abs.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn is_path_under_any_dir_allow_missing(path: &Path, allowed_parents: &[PathBuf]) -> bool {
+    if is_path_under_any_dir(path, allowed_parents) {
+        return true;
+    }
+
+    let normalized_path = normalize_path_for_prefix_check(path);
+    allowed_parents.iter().any(|parent| {
+        let normalized_parent = normalize_path_for_prefix_check(parent);
+        normalized_path.starts_with(normalized_parent)
+    })
+}
+
 /// List receipts from multiple directories.
 pub fn list_receipts(
     limit: usize,
@@ -128,10 +162,17 @@ pub fn list_receipts(
 ) -> Result<ReceiptsListResponse> {
     let mut entries: Vec<ReceiptSummary> = vec![];
 
+    let allowed_dirs = receipt_dirs();
     let dirs_to_scan: Vec<PathBuf> = if let Some(dir) = dir_override {
+        if !is_path_under_any_dir_allow_missing(dir, &allowed_dirs) {
+            return Err(anyhow::anyhow!(
+                "path is outside allowed receipts directory: {}",
+                dir.display()
+            ));
+        }
         vec![dir.clone()]
     } else {
-        receipt_dirs()
+        allowed_dirs
     };
 
     for dir in dirs_to_scan {
