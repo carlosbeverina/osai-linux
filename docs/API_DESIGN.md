@@ -11,13 +11,13 @@ UI → osai-api → osai-agent-core → ToolBroker/ToolExecutor/receipts
 
 ## Current Status
 
-osai-api exists as a prototype with:
-- Basic HTTP server structure
+osai-api provides the Phase 2 MVP local API with:
+- Loopback-only HTTP server at `127.0.0.1:8090`
 - Prototype Dev Panel at `/ui`
-- Partial endpoint implementations
-- Local token auth just added
-
-Full endpoint implementation is planned for Phase 2.
+- Health/status/capabilities/runtime/auth introspection endpoints
+- Token-protected chat, ask, plans, apply, and receipts endpoints
+- Direct `osai-agent-core` integration for chat, ask, and apply
+- Safe plan, receipt, and static-file reads with path traversal protections
 
 ## Design Principles
 
