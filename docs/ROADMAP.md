@@ -6,7 +6,7 @@ Phased implementation plan for OSAI. Each phase has clear acceptance criteria. D
 
 **Goal**: Lock in current working state with complete documentation.
 
-**Status**: ✅ In progress (this documentation pass)
+**Status**: ✅ Complete
 
 **Acceptance Criteria**:
 - [x] All documentation files created
@@ -36,7 +36,7 @@ Phased implementation plan for OSAI. Each phase has clear acceptance criteria. D
 - [x] CLI still works identically (`cargo run -p osai-agent-cli -- chat "test"`)
 - [x] MVP loop still works
 - [x] `cargo test --workspace` passes
-- [ ] `osai-agent-core` exports clean public API
+- [x] `osai-agent-core` exports clean public API
 
 ## Phase 2: osai-api
 

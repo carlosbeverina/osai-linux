@@ -9,7 +9,7 @@ cargo check --workspace
 cargo test --workspace
 
 # Model Router
-cd services/model-router && pytest tests
+cd services/model-router && PYTHONPATH=src pytest tests
 
 # Local runtime (requires services running)
 ./scripts/osai-local-check
@@ -56,7 +56,7 @@ Current expected test counts:
 
 ```bash
 cd services/model-router
-pytest tests
+PYTHONPATH=src pytest tests
 ```
 
 Currently ~64 tests covering providers, routing, receipts, normalization.
