@@ -1512,15 +1512,19 @@ mod tests {
 
     #[test]
     fn test_resolve_policy_path_absolute_unchanged() {
-        let result = resolve_policy_path(Some("/tmp/custom.yml"));
-        assert_eq!(result, std::path::PathBuf::from("/tmp/custom.yml"));
+        let path = std::env::temp_dir().join("custom.yml");
+        let result = resolve_policy_path(Some(path.to_str().unwrap()));
+        assert_eq!(result, path);
     }
 
     #[test]
     fn test_resolve_policy_path_works_from_different_cwd() {
         // Save and restore cwd
         let orig_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir("/tmp").unwrap();
+        let scratch =
+            std::env::temp_dir().join(format!("osai-api-cwd-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::env::set_current_dir(&scratch).unwrap();
 
         let result = resolve_policy_path(None);
         assert!(
@@ -1535,6 +1539,7 @@ mod tests {
         );
 
         let _ = std::env::set_current_dir(&orig_cwd);
+        let _ = std::fs::remove_dir_all(scratch);
     }
 
     // ========================================================================

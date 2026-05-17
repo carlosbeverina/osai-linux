@@ -196,49 +196,21 @@ fn normalize_path_for_prefix_check(path: &Path) -> String {
             .unwrap_or_else(|_| path.to_path_buf())
     };
 
-    let mut parts: Vec<String> = Vec::new();
+    let mut normalized = PathBuf::new();
     for component in abs.components() {
         match component {
             std::path::Component::ParentDir => {
-                if !parts.is_empty() {
-                    parts.pop();
-                }
+                normalized.pop();
             }
+            std::path::Component::CurDir => {}
             std::path::Component::Normal(s) => {
-                if let Some(s_str) = s.to_str() {
-                    parts.push(s_str.to_string());
-                }
+                normalized.push(s);
             }
-            std::path::Component::RootDir => {
-                parts.clear();
-            }
-            // Ignore CurDir, etc.
-            _ => {}
+            other => normalized.push(other.as_os_str()),
         }
     }
 
-    if parts.is_empty() {
-        return abs
-            .components()
-            .next()
-            .map(|c| c.as_os_str().to_string_lossy().to_string())
-            .unwrap_or_default();
-    }
-
-    let base = if abs.is_absolute() {
-        std::path::Component::RootDir
-            .as_os_str()
-            .to_string_lossy()
-            .to_string()
-    } else {
-        String::new()
-    };
-
-    if base.is_empty() {
-        parts.join("/")
-    } else {
-        base + &parts.join("/")
-    }
+    normalized.to_string_lossy().replace('\\', "/")
 }
 
 /// Authorize a plan without executing it. Returns preview of authorization decisions.
@@ -883,11 +855,31 @@ pub fn print_apply_output(output: &ApplyCoreOutput, json: bool) {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("osai-core-{}-{}", name, uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn with_test_home<T>(test: impl FnOnce(PathBuf) -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let home = unique_test_dir("home");
+        std::fs::create_dir_all(home.join("Downloads")).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let result = test(home.clone());
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(home);
+        result
     }
 
     fn write_failing_browser_plan(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
@@ -1002,16 +994,15 @@ shell_requires_sandbox: true"#,
 
     #[test]
     fn test_is_path_in_allowed_roots_expands_tilde() {
-        let home = std::env::var("HOME").unwrap();
-        let home_path = PathBuf::from(&home);
-
-        // ~/Downloads with absolute allowed root
-        let path = PathBuf::from("~/Downloads");
-        let allowed = vec![home_path.join("Downloads")];
-        assert!(
-            is_path_in_allowed_roots(&path, &allowed),
-            "~/Downloads should be allowed when $HOME/Downloads is allowed"
-        );
+        with_test_home(|home| {
+            // ~/Downloads with absolute allowed root
+            let path = PathBuf::from("~/Downloads");
+            let allowed = vec![home.join("Downloads")];
+            assert!(
+                is_path_in_allowed_roots(&path, &allowed),
+                "~/Downloads should be allowed when $HOME/Downloads is allowed"
+            );
+        });
     }
 
     #[test]
@@ -1027,31 +1018,29 @@ shell_requires_sandbox: true"#,
 
     #[test]
     fn test_is_path_in_allowed_roots_denies_etc() {
-        let home = std::env::var("HOME").unwrap();
-        let home_path = PathBuf::from(&home);
-
-        // /etc should be denied when only home is allowed
-        let path = PathBuf::from("/etc");
-        let allowed = vec![home_path.join("Downloads")];
-        assert!(
-            !is_path_in_allowed_roots(&path, &allowed),
-            "/etc should be denied when only $HOME/Downloads is allowed"
-        );
+        with_test_home(|home| {
+            let outside = unique_test_dir("outside");
+            let allowed = vec![home.join("Downloads")];
+            assert!(
+                !is_path_in_allowed_roots(&outside, &allowed),
+                "outside path should be denied when only $HOME/Downloads is allowed"
+            );
+            let _ = std::fs::remove_dir_all(outside);
+        });
     }
 
     #[test]
     fn test_is_path_in_allowed_roots_dotdot_does_not_bypass() {
-        let home = std::env::var("HOME").unwrap();
-        let home_path = PathBuf::from(&home);
-
-        // ~/Downloads/.. should not bypass to home
-        let path = PathBuf::from("~/Downloads/..");
-        let allowed = vec![home_path.join("Downloads")];
-        // Path resolves to parent of Downloads which is $HOME, not inside Downloads
-        assert!(
-            !is_path_in_allowed_roots(&path, &allowed),
-            "~/Downloads/.. should not be allowed inside ~/Downloads"
-        );
+        with_test_home(|home| {
+            // ~/Downloads/.. should not bypass to home
+            let path = PathBuf::from("~/Downloads/..");
+            let allowed = vec![home.join("Downloads")];
+            // Path resolves to parent of Downloads which is $HOME, not inside Downloads
+            assert!(
+                !is_path_in_allowed_roots(&path, &allowed),
+                "~/Downloads/.. should not be allowed inside ~/Downloads"
+            );
+        });
     }
 
     #[test]
@@ -1073,10 +1062,10 @@ shell_requires_sandbox: true"#,
 
     #[test]
     fn test_normalize_path_preserves_absolute() {
-        let path = PathBuf::from("/home/user/Downloads");
+        let path = std::env::temp_dir().join("osai-normalize-absolute");
         let normalized = normalize_path_for_prefix_check(&path);
         assert!(
-            normalized.starts_with('/'),
+            PathBuf::from(&normalized).is_absolute(),
             "absolute path should stay absolute: {}",
             normalized
         );

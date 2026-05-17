@@ -857,7 +857,11 @@ mod policy_tests {
             path_str
         );
         assert!(
-            path_str.ends_with("examples/policies/default-secure.yml"),
+            path.ends_with(
+                PathBuf::from("examples")
+                    .join("policies")
+                    .join("default-secure.yml")
+            ),
             "should end with examples/policies/default-secure.yml, got: {}",
             path_str
         );
@@ -897,17 +901,21 @@ mod policy_tests {
 
     #[test]
     fn test_resolve_policy_path_absolute_unchanged() {
-        let result = resolve_policy_path(Some("/tmp/custom-policy.yml"));
-        assert_eq!(result, PathBuf::from("/tmp/custom-policy.yml"));
+        let path = std::env::temp_dir().join("custom-policy.yml");
+        let result = resolve_policy_path(Some(path.to_str().unwrap()));
+        assert_eq!(result, path);
     }
 
     #[test]
     fn test_resolve_policy_path_works_when_cwd_is_tmp() {
         // Save current dir
         let orig_cwd = std::env::current_dir().unwrap();
+        let scratch =
+            std::env::temp_dir().join(format!("osai-core-cwd-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
 
-        // Change to /tmp (should not affect compile-time workspace root resolution)
-        std::env::set_current_dir("/tmp").unwrap();
+        // Change cwd (should not affect compile-time workspace root resolution)
+        std::env::set_current_dir(&scratch).unwrap();
 
         // Both None and relative should still resolve to repo policy
         let from_none = resolve_policy_path(None);
@@ -915,6 +923,7 @@ mod policy_tests {
 
         // Restore original cwd
         let _ = std::env::set_current_dir(&orig_cwd);
+        let _ = std::fs::remove_dir_all(scratch);
 
         // Verify they're still absolute and point to the repo policy (not /tmp/...)
         assert!(

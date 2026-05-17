@@ -662,13 +662,15 @@ mod tests {
 
     #[test]
     fn test_files_list_succeeds_for_allowed_root() {
-        let (_tempdir, store) = create_test_store();
-        let executor = ToolExecutor::new(store, vec![PathBuf::from("/tmp")]);
+        let (tempdir, store) = create_test_store();
+        let list_root = tempdir.path().join("list-root");
+        std::fs::create_dir_all(&list_root).unwrap();
+        let executor = ToolExecutor::new(store, vec![list_root.clone()]);
 
         let mut request = create_allowed_request(ActionKind::FilesList);
         request.id = Uuid::new_v4();
         let mut inputs = BTreeMap::new();
-        inputs.insert("path".to_string(), serde_json::json!("/tmp"));
+        inputs.insert("path".to_string(), serde_json::json!(list_root));
         request.inputs = inputs;
 
         let decision = create_allowed_decision();
@@ -700,15 +702,17 @@ mod tests {
 
     #[test]
     fn test_files_list_does_not_recurse() {
-        let (_tempdir, store) = create_test_store();
-        let executor = ToolExecutor::new(store, vec![PathBuf::from("/tmp")]);
+        let (tempdir, store) = create_test_store();
+        let list_root = tempdir.path().join("list-root");
+        std::fs::create_dir_all(&list_root).unwrap();
+        let executor = ToolExecutor::new(store, vec![list_root.clone()]);
 
         // v0.1 doesn't actually list, but this verifies the action is handled
         let mut request = create_allowed_request(ActionKind::FilesList);
         request.id = Uuid::new_v4();
         let mut inputs = BTreeMap::new();
-        // Use /tmp which exists - nested paths are accepted but listing is empty
-        inputs.insert("path".to_string(), serde_json::json!("/tmp"));
+        // Use an existing temp directory - nested paths are accepted but listing is empty
+        inputs.insert("path".to_string(), serde_json::json!(list_root));
         request.inputs = inputs;
 
         let decision = create_allowed_decision();

@@ -63,8 +63,8 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8088")]
         model_router_url: String,
         /// Directory for receipts.
-        #[arg(long, default_value = "/tmp/osai-doctor-receipts")]
-        receipts_dir: PathBuf,
+        #[arg(long)]
+        receipts_dir: Option<PathBuf>,
         /// Skip model router checks.
         #[arg(long)]
         skip_model_router: bool,
@@ -297,6 +297,10 @@ fn read_plan(path: &PathBuf) -> Result<OsaiPlan> {
     }
 }
 
+fn default_doctor_receipts_dir() -> PathBuf {
+    std::env::temp_dir().join("osai-doctor-receipts")
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -447,7 +451,7 @@ fn main() -> Result<()> {
         } => run_doctor(
             repo_root.as_ref().map(|p| p.as_path()),
             &model_router_url,
-            &receipts_dir,
+            &receipts_dir.unwrap_or_else(default_doctor_receipts_dir),
             skip_model_router,
             json,
         ),
@@ -1662,9 +1666,13 @@ shell_requires_sandbox: true
         let plan_path = tempdir.path().join("plan.yml");
         let policy_path = tempdir.path().join("policy.yml");
         let receipts_dir = tempdir.path().join("receipts");
-        let allowed_root = vec![std::path::PathBuf::from("/tmp")];
+        let list_root = tempdir.path().join("list-root");
+        fs::create_dir_all(&list_root).unwrap();
+        let list_root_str = list_root.to_string_lossy().replace('\\', "/");
+        let allowed_root = vec![list_root.clone()];
 
-        let plan = r#"version: "0.1"
+        let plan = format!(
+            r#"version: "0.1"
 id: "550e8400-e29b-41d4-a716-446655440000"
 title: Safe Plan
 actor: test-actor
@@ -1677,9 +1685,11 @@ steps:
     description: List files
     requires_approval: false
     inputs:
-      path: /tmp
-metadata: {}
-"#;
+      path: "{}"
+metadata: {{}}
+"#,
+            list_root_str
+        );
         let policy = r#"default_mode: Ask
 action_modes:
   FilesList: Allow
@@ -3973,12 +3983,16 @@ shell_requires_sandbox: true"#,
         let receipts_dir = tempdir.path().join("receipts");
         let plans_dir = tempdir.path().join("plans");
         fs::create_dir_all(&plans_dir).unwrap();
+        let list_root = tempdir.path().join("list-root");
+        fs::create_dir_all(&list_root).unwrap();
+        let list_root_str = list_root.to_string_lossy().replace('\\', "/");
 
         // Create a valid plan
         let plan_path = plans_dir.join("success-plan.yml");
         fs::write(
             &plan_path,
-            r#"version: "0.1"
+            format!(
+                r#"version: "0.1"
 id: "550e8400-e29b-41d4-a716-446655440001"
 title: "List Downloads"
 description: "List files in Downloads"
@@ -3992,8 +4006,10 @@ steps:
     description: "List files"
     requires_approval: false
     inputs:
-      path: /tmp
-metadata: {}"#,
+      path: "{}"
+metadata: {{}}"#,
+                list_root_str
+            ),
         )
         .unwrap();
 
@@ -4013,7 +4029,7 @@ shell_requires_sandbox: true"#,
             &plan_path,
             &policy_path,
             Some(receipts_dir.as_path()),
-            &[std::path::PathBuf::from("/tmp")],
+            &[list_root],
             &[],
             false,
             None,
@@ -4232,12 +4248,16 @@ shell_requires_sandbox: true"#,
         let receipts_dir = tempdir.path().join("receipts");
         let plans_dir = tempdir.path().join("plans");
         fs::create_dir_all(&plans_dir).unwrap();
+        let list_root = tempdir.path().join("list-root");
+        fs::create_dir_all(&list_root).unwrap();
+        let list_root_str = list_root.to_string_lossy().replace('\\', "/");
 
         // Create a valid plan
         let plan_path = plans_dir.join("json-plan.yml");
         fs::write(
             &plan_path,
-            r#"version: "0.1"
+            format!(
+                r#"version: "0.1"
 id: "550e8400-e29b-41d4-a716-446655440001"
 title: "List Downloads"
 description: "List files"
@@ -4251,8 +4271,10 @@ steps:
     description: "List files"
     requires_approval: false
     inputs:
-      path: /tmp
-metadata: {}"#,
+      path: "{}"
+metadata: {{}}"#,
+                list_root_str
+            ),
         )
         .unwrap();
 
@@ -4272,7 +4294,7 @@ shell_requires_sandbox: true"#,
             &plan_path,
             &policy_path,
             Some(receipts_dir.as_path()),
-            &[std::path::PathBuf::from("/tmp")],
+            &[list_root],
             &[],
             false,
             None,
@@ -4288,12 +4310,16 @@ shell_requires_sandbox: true"#,
         let receipts_dir = tempdir.path().join("receipts");
         let plans_dir = tempdir.path().join("plans");
         fs::create_dir_all(&plans_dir).unwrap();
+        let list_root = tempdir.path().join("list-root");
+        fs::create_dir_all(&list_root).unwrap();
+        let list_root_str = list_root.to_string_lossy().replace('\\', "/");
 
         // Create a plan with multiple steps
         let plan_path = plans_dir.join("summary-plan.yml");
         fs::write(
             &plan_path,
-            r#"version: "0.1"
+            format!(
+                r#"version: "0.1"
 id: "550e8400-e29b-41d4-a716-446655440001"
 title: "Multi step plan"
 description: "Test"
@@ -4307,15 +4333,17 @@ steps:
     description: "List 1"
     requires_approval: false
     inputs:
-      path: /tmp
+      path: "{}"
   - id: "step-2"
     action:
       type: FilesList
     description: "List 2"
     requires_approval: false
     inputs:
-      path: /tmp
-metadata: {}"#,
+      path: "{}"
+metadata: {{}}"#,
+                list_root_str, list_root_str
+            ),
         )
         .unwrap();
 
@@ -4335,7 +4363,7 @@ shell_requires_sandbox: true"#,
             &plan_path,
             &policy_path,
             Some(receipts_dir.as_path()),
-            &[std::path::PathBuf::from("/tmp")],
+            &[list_root],
             &[],
             false,
             None,

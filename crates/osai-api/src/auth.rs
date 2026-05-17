@@ -17,6 +17,11 @@ static TOKEN_CACHE: OnceLock<Option<String>> = OnceLock::new();
 
 /// Path to the local API token file.
 pub fn token_file_path() -> PathBuf {
+    #[cfg(test)]
+    if let Ok(path) = std::env::var("OSAI_API_TOKEN_FILE") {
+        return PathBuf::from(path);
+    }
+
     dirs::home_dir()
         .map(|h| h.join(".config").join("osai").join("api-token"))
         .unwrap_or_else(|| PathBuf::from("/tmp/osai-api-token"))
@@ -209,13 +214,20 @@ mod tests {
     }
 
     fn with_isolated_home<T>(env_token: Option<&str>, test: impl FnOnce(PathBuf) -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let old_home = std::env::var_os("HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
         let old_token = std::env::var_os("OSAI_API_TOKEN");
+        let old_token_file = std::env::var_os("OSAI_API_TOKEN_FILE");
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
+        let token_path = home.join(".config").join("osai").join("api-token");
 
         std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("OSAI_API_TOKEN_FILE", &token_path);
         match env_token {
             Some(token) => std::env::set_var("OSAI_API_TOKEN", token),
             None => std::env::remove_var("OSAI_API_TOKEN"),
@@ -227,9 +239,17 @@ mod tests {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+        match old_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
         match old_token {
             Some(value) => std::env::set_var("OSAI_API_TOKEN", value),
             None => std::env::remove_var("OSAI_API_TOKEN"),
+        }
+        match old_token_file {
+            Some(value) => std::env::set_var("OSAI_API_TOKEN_FILE", value),
+            None => std::env::remove_var("OSAI_API_TOKEN_FILE"),
         }
         let _ = std::fs::remove_dir_all(home);
 

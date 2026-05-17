@@ -194,10 +194,12 @@ cargo run -p osai-agent-cli -- doctor
 ```
 crates/
   osai-agent-cli/     # CLI application
+  osai-agent-core/    # Reusable chat, ask, apply, runtime, and shared APIs
   osai-plan-dsl/      # Plan DSL validation and types
   osai-toolbroker/    # Authorization layer
   osai-tool-executor/ # Action execution
   osai-receipt-logger/ # Receipt storage
+  osai-api/           # Loopback local API and Dev Panel
 
 services/
   model-router/       # FastAPI OpenAI-compatible gateway
