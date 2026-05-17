@@ -13,7 +13,7 @@ This document describes what is currently implemented and validated in the OSAI 
 | `osai-toolbroker` | ✅ | Authorization layer, policy evaluation, decision logging |
 | `osai-tool-executor` | ✅ | Action execution for supported tools |
 | `osai-receipt-logger` | ✅ | Receipt storage, list, read, secret redaction |
-| `osai-agent-core` | ⚠️ | (Partially extracted — chat.rs, ask.rs, apply.rs, runtime.rs, shared.rs; extraction ongoing) |
+| `osai-agent-core` | ✅ | Shared chat, ask/plan generation, apply authorization/execution, runtime status, and shared helper APIs used by CLI and API |
 
 ## Model Router
 
@@ -144,12 +144,15 @@ Example receipt structure:
 }
 ```
 
-## Known Limitations
+## Implemented Foundation and Known Limitations
+
+Implemented foundation:
+
+- ✅ `osai-agent-core` — Shared chat, ask, apply, runtime, and helper APIs are available for CLI/API callers
+- ✅ `osai-api` — MVP local API endpoints exist with token auth, core integration, safe plan/receipt reads, and Dev Panel UI (not final desktop UI)
 
 The following are **not yet implemented**:
 
-- ⚠️ `osai-agent-core` — Partial extraction done, full extraction ongoing
-- ⚠️ `osai-api` — Prototype exists with auth guard, endpoints, Dev Panel UI (not final desktop UI)
 - ❌ UI — Dev Panel exists at port 8090, final desktop UI not built
 - ❌ Desktop integration — COSMIC/KDE/GNOME shell integration
 - ❌ Conversation history — Chat has no memory across sessions

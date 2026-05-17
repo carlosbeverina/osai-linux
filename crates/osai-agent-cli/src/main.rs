@@ -3,8 +3,10 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use osai_agent_core::{
-    apply::run_apply as core_run_apply, ask::run_ask as core_run_ask,
-    chat::run_chat as core_run_chat, is_loopback_url, runtime as runtime_core, step_to_request,
+    apply::{print_apply_output, run_apply_core},
+    ask::ask_core,
+    chat::chat_core,
+    is_loopback_url, runtime as runtime_core, step_to_request,
 };
 use osai_plan_dsl::OsaiPlan;
 use osai_receipt_logger::ReceiptStore;
@@ -14,6 +16,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+#[cfg(test)]
+use osai_agent_core::{
+    apply::run_apply as core_run_apply, ask::run_ask as core_run_ask,
+    chat::run_chat as core_run_chat,
+};
 
 /// OSAI Agent CLI - Work with OSAI Agent App manifests and Plan DSL files.
 #[derive(Parser)]
@@ -372,17 +380,36 @@ fn main() -> Result<()> {
             temperature,
             json,
             positional_message,
-        } => core_run_chat(
-            message.as_deref(),
-            &model_router_url,
-            receipts_dir.as_ref().map(|p| p.as_path()),
-            &model,
-            &privacy,
-            max_tokens,
-            temperature,
-            json,
-            &positional_message,
-        ),
+        } => {
+            let has_positional = !positional_message.is_empty();
+            let has_message_arg = message.is_some();
+            if has_positional && has_message_arg {
+                return Err(anyhow::anyhow!(
+                    "Cannot use both positional message and --message flag. Use one or the other."
+                ));
+            }
+            if !has_positional && !has_message_arg {
+                return Err(anyhow::anyhow!(
+                    "No message provided. Use a positional message or --message flag."
+                ));
+            }
+            let message = message.unwrap_or_else(|| positional_message.join(" "));
+            let result = chat_core(
+                &message,
+                &model_router_url,
+                receipts_dir.as_ref().map(|p| p.as_path()),
+                &model,
+                &privacy,
+                max_tokens,
+                temperature,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            } else if let Some(content) = result.content {
+                println!("{}", content);
+            }
+            Ok(())
+        }
         Commands::Apply {
             plan,
             policy,
@@ -393,17 +420,24 @@ fn main() -> Result<()> {
             model_router_url,
             dry_run,
             json,
-        } => core_run_apply(
-            &plan,
-            &policy,
-            receipts_dir.as_ref().map(|p| p.as_path()),
-            &allowed_root,
-            &approve,
-            approve_all,
-            model_router_url.as_deref(),
-            dry_run,
-            json,
-        ),
+        } => {
+            let output = run_apply_core(
+                &plan,
+                &policy,
+                receipts_dir.as_ref().map(|p| p.as_path()),
+                &allowed_root,
+                &approve,
+                approve_all,
+                model_router_url.as_deref(),
+                dry_run,
+            )?;
+            print_apply_output(&output, json);
+            if output.result.failed > 0 {
+                Err(anyhow::anyhow!("{} step(s) failed", output.result.failed))
+            } else {
+                Ok(())
+            }
+        }
         Commands::Doctor {
             repo_root,
             model_router_url,
@@ -433,20 +467,61 @@ fn main() -> Result<()> {
             print_plan,
             output,
             positional_request,
-        } => core_run_ask(
-            message.as_deref(),
-            &model_router_url,
-            receipts_dir.as_ref().map(|p| p.as_path()),
-            Some(plans_dir.as_path()),
-            &model,
-            &privacy,
-            max_tokens,
-            temperature,
-            json,
-            print_plan,
-            output.as_ref().map(|p| p.as_path()),
-            &positional_request,
-        ),
+        } => {
+            let has_positional = !positional_request.is_empty();
+            let has_message_arg = message.is_some();
+            if has_positional && has_message_arg {
+                return Err(anyhow::anyhow!(
+                    "Cannot use both positional request and --message flag. Use one or the other."
+                ));
+            }
+            if !has_positional && !has_message_arg {
+                return Err(anyhow::anyhow!(
+                    "No request provided. Use a positional request or --message flag."
+                ));
+            }
+            let request = message.unwrap_or_else(|| positional_request.join(" "));
+            let result = ask_core(
+                &request,
+                &model_router_url,
+                receipts_dir.as_ref().map(|p| p.as_path()),
+                Some(plans_dir.as_path()),
+                &model,
+                &privacy,
+                max_tokens,
+                temperature,
+                output.as_ref().map(|p| p.as_path()),
+            )?;
+            if json {
+                #[derive(Serialize)]
+                struct CliAskResult {
+                    status: String,
+                    output_path: String,
+                    validation: String,
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&CliAskResult {
+                        status: result.status,
+                        output_path: result.output_path.clone().unwrap_or_default(),
+                        validation: result.validation,
+                    })
+                    .unwrap()
+                );
+            } else {
+                println!(
+                    "Generated valid plan: {}",
+                    result.output_path.clone().unwrap_or_default()
+                );
+            }
+            if print_plan {
+                println!();
+                if let Some(yaml_output) = result.yaml_output {
+                    println!("{}", yaml_output);
+                }
+            }
+            Ok(())
+        }
         Commands::Tool { action } => match action {
             ToolCommands::Authorize {
                 plan,

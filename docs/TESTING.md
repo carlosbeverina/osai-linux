@@ -46,7 +46,7 @@ Must pass — all 200+ tests across all crates.
 Current expected test counts:
 - osai-agent-cli: ~62 tests
 - osai-agent-core: ~28 tests (runtime status tests)
-- osai-api: ~45 tests (auth, requests, UI serving)
+- osai-api: ~53 tests (auth, requests, API mapping, path safety, UI serving)
 - osai-plan-dsl: ~21 tests
 - osai-receipt-logger: ~28 tests
 - osai-tool-executor: ~20 tests

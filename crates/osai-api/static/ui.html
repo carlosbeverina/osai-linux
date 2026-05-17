@@ -19,8 +19,8 @@
   button.danger:hover { background: #f85149; }
   button.secondary { background: #30363d; }
   button.secondary:hover { background: #484f58; }
-  textarea, input[type="text"] { width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 8px; font-family: monospace; font-size: 12px; resize: vertical; }
-  input[type="text"] { resize: none; }
+  textarea, input[type="text"], input[type="password"] { width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 8px; font-family: monospace; font-size: 12px; resize: vertical; }
+  input[type="text"], input[type="password"] { resize: none; }
   .output { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 8px; min-height: 60px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; font-size: 12px; margin-top: 8px; }
   .output.error { border-color: #f85149; color: #f85149; }
   .output.success { border-color: #2ea043; }
@@ -232,12 +232,26 @@ function getHeaders() {
   return headers;
 }
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[ch]));
+}
+
+function unauthorizedMessage(scope='request') {
+  return `Error: unauthorized — set your token using the "Use token" button above before retrying this ${scope}.`;
+}
+
 // Activity log
 function log(msg, type='info') {
   const el = document.getElementById('activity-log');
   const time = new Date().toLocaleTimeString();
   const cls = type === 'error' ? 'log-error' : type === 'success' ? 'log-success' : '';
-  el.innerHTML = `<div class="log-entry ${cls}"><span class="log-time">[${time}]</span> ${msg}</div>` + el.innerHTML;
+  el.innerHTML = `<div class="log-entry ${cls}"><span class="log-time">[${time}]</span> ${escapeHtml(msg)}</div>` + el.innerHTML;
   if (el.children.length > 50) el.removeChild(el.lastChild);
 }
 
@@ -252,7 +266,7 @@ async function refreshStatus() {
   const el = document.getElementById('status-output');
   el.innerHTML = 'Loading...';
   try {
-    const [health, status, caps] = await Promise.all([
+    const [health, status, caps, auth] = await Promise.all([
       fetch(API + '/health').then(r => r.json()).catch(() => null),
       fetch(API + '/v1/status').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch(API + '/v1/capabilities').then(r => r.ok ? r.json() : null).catch(() => null),
@@ -262,17 +276,18 @@ async function refreshStatus() {
     const healthOk = health && health.ok;
     const routerReachable = status && status.model_router && status.model_router.reachable;
     const modelStatus = status ? status.models_status : null;
-    const authRequired = caps && caps.auth_status;
+    const authClass = auth && auth.auth_required ? 'status-warn' : 'status-ok';
 
     el.innerHTML = `
       <div class="${healthOk ? 'status-ok' : 'status-fail'}">osai-api health: ${healthOk ? 'OK' : 'FAIL'}</div>
       <div class="${routerReachable ? 'status-ok' : 'status-fail'}">Model Router reachable: ${routerReachable ? 'true' : 'false'}</div>
-      ${modelStatus ? `<div class="status-warn">Model: ${JSON.stringify(modelStatus)}</div>` : ''}
+      ${modelStatus ? `<div class="status-warn">Model: ${escapeHtml(JSON.stringify(modelStatus))}</div>` : ''}
+      ${auth ? `<div class="${authClass}">Auth required: ${auth.auth_required ? 'yes' : 'no'} | source: ${escapeHtml(auth.token_source)}</div>` : '<div class="status-fail">Auth status: unavailable</div>'}
       ${caps ? `<div>Capabilities: chat=${caps.chat}, ask=${caps.ask}, plan_authorize=${caps.plan_authorize}, apply=${caps.apply}, plans=${caps.plans}, receipts=${caps.receipts}, auth_status=${caps.auth_status}</div>` : '<div class="status-fail">Capabilities: unavailable</div>'}
     `;
     log('Status refreshed: model_router.reachable=' + String(routerReachable));
   } catch (e) {
-    el.innerHTML = `<div class="status-fail">Failed to load status: ${e.message}</div>`;
+    el.innerHTML = `<div class="status-fail">Failed to load status: ${escapeHtml(e.message)}</div>`;
     log('Status refresh failed: ' + e.message, 'error');
   }
 }
@@ -296,8 +311,8 @@ async function refreshRuntimeStatus() {
 
     let html = '<div style="margin-bottom:8px;">';
     html += '<span class="' + (data.overall === 'healthy' ? 'status-ok' : data.overall === 'stopped' ? 'status-fail' : 'status-warn') + '">';
-    html += 'Overall: ' + (data.overall || 'unknown') + '</span> &nbsp;';
-    html += '<span style="color:#8b949e;">Mode: ' + (data.runtime_mode || 'unknown') + '</span>';
+    html += 'Overall: ' + escapeHtml(data.overall || 'unknown') + '</span> &nbsp;';
+    html += '<span style="color:#8b949e;">Mode: ' + escapeHtml(data.runtime_mode || 'unknown') + '</span>';
     html += '</div>';
 
     html += '<table style="width:auto; font-size:11px;">';
@@ -306,9 +321,9 @@ async function refreshRuntimeStatus() {
       const healthClass = comp.healthy ? 'status-ok' : 'status-fail';
       const reachable = comp.reachable ? 'yes' : 'no';
       html += '<tr>';
-      html += '<td>' + name + '</td>';
+      html += '<td>' + escapeHtml(name) + '</td>';
       html += '<td class="' + healthClass + '">' + (comp.healthy ? 'healthy' : 'unhealthy') + ' (' + reachable + ')</td>';
-      html += '<td style="color:#8b949e;">' + (comp.url || '') + '</td>';
+      html += '<td style="color:#8b949e;">' + escapeHtml(comp.url || '') + '</td>';
       html += '</tr>';
     }
     html += '</table>';
@@ -320,7 +335,7 @@ async function refreshRuntimeStatus() {
       for (const [name, svc] of Object.entries(systemd.services)) {
         const activeClass = svc.active ? 'status-ok' : 'status-fail';
         html += '<tr>';
-        html += '<td>' + name.replace('.service', '') + '</td>';
+        html += '<td>' + escapeHtml(name.replace('.service', '')) + '</td>';
         html += '<td class="' + activeClass + '">' + (svc.active ? 'yes' : 'no') + '</td>';
         html += '<td>' + (svc.enabled ? 'yes' : 'no') + '</td>';
         html += '</tr>';
@@ -333,14 +348,14 @@ async function refreshRuntimeStatus() {
     if (hints.length > 0) {
       html += '<div style="margin-top:8px; font-size:11px;">Hints:</div>';
       for (const hint of hints) {
-        html += '<div style="color:#d29922; font-size:11px;">- ' + hint + '</div>';
+        html += '<div style="color:#d29922; font-size:11px;">- ' + escapeHtml(hint) + '</div>';
       }
     }
 
     el.innerHTML = html;
     log('Runtime status refreshed: overall=' + data.overall + ', mode=' + data.runtime_mode);
   } catch (e) {
-    el.innerHTML = '<div class="status-fail">Failed to load runtime status: ' + e.message + '</div>';
+    el.innerHTML = '<div class="status-fail">Failed to load runtime status: ' + escapeHtml(e.message) + '</div>';
     log('Runtime status refresh failed: ' + e.message, 'error');
   }
 }
@@ -358,7 +373,7 @@ async function sendChat() {
       body: JSON.stringify({ message: msg })
     });
     if (res.status === 401) {
-      out.textContent = 'Error: unauthorized — set your token using the "Use token" button above.';
+      out.textContent = unauthorizedMessage('request');
       out.className = 'output error';
       log('Chat auth required', 'error');
       return;
@@ -393,7 +408,7 @@ async function sendAsk() {
       body: JSON.stringify({ request: req })
     });
     if (res.status === 401) {
-      out.textContent = 'Error: unauthorized — set your token using the "Use token" button above.';
+      out.textContent = unauthorizedMessage('request');
       out.className = 'output error';
       log('Ask auth required', 'error');
       return;
@@ -426,7 +441,7 @@ async function refreshPlans() {
   try {
     const res = await fetch(API + '/v1/plans?limit=20', { headers: getHeaders() });
     if (res.status === 401) {
-      el.innerHTML = 'Error: unauthorized — set your token above.';
+      el.textContent = unauthorizedMessage('list request');
       log('Plans load auth required', 'error');
       return;
     }
@@ -437,13 +452,20 @@ async function refreshPlans() {
         el.innerHTML = 'No plans found.';
         return;
       }
-      el.innerHTML = state.plans.map(p => `
-        <div class="item ${p.valid ? 'valid' : 'invalid'} ${state.selectedPlan && state.selectedPlan.endsWith(p.filename) ? 'selected' : ''}"
-             onclick="selectPlan('${p.path.replace(/\\/g, '\\\\')}')">
-          <div class="item-title">${p.title || p.filename}</div>
-          <div class="item-meta">${p.filename} | risk: ${p.risk} | approval: ${p.approval} | steps: ${p.steps} | ${p.valid ? 'valid' : 'error: ' + p.error}</div>
-        </div>
-      `).join('');
+      el.innerHTML = state.plans.map((p, index) => {
+        const selected = state.selectedPlan && state.selectedPlan === p.path;
+        const title = escapeHtml(p.title || p.filename);
+        const meta = `${p.filename} | risk: ${p.risk} | approval: ${p.approval} | steps: ${p.steps} | ${p.valid ? 'valid' : 'error: ' + (p.error || 'unknown')}`;
+        return `
+          <div class="item ${p.valid ? 'valid' : 'invalid'} ${selected ? 'selected' : ''}" data-plan-index="${index}">
+            <div class="item-title">${title}</div>
+            <div class="item-meta">${escapeHtml(meta)}</div>
+          </div>
+        `;
+      }).join('');
+      el.querySelectorAll('[data-plan-index]').forEach((item) => {
+        item.addEventListener('click', () => selectPlan(state.plans[Number(item.dataset.planIndex)].path));
+      });
       log('Plans refreshed: ' + state.plans.length + ' found');
     } else {
       el.innerHTML = 'Failed to load plans.';
@@ -468,7 +490,7 @@ async function selectPlan(path) {
     const encoded = encodeURIComponent(path);
     const res = await fetch(API + '/v1/plans/read?path=' + encoded, { headers: getHeaders() });
     if (res.status === 401) {
-      document.getElementById('plan-content').textContent = 'Error: unauthorized — set your token above.';
+      document.getElementById('plan-content').textContent = unauthorizedMessage('plan read request');
       log('Plan read auth required', 'error');
       return;
     }
@@ -486,8 +508,9 @@ async function selectPlan(path) {
   }
 
   // Update selection UI
-  document.querySelectorAll('#plans-list .item').forEach(el => {
-    el.classList.toggle('selected', el.onclick.toString().includes(path.replace(/\\/g, '\\\\')));
+  document.querySelectorAll('#plans-list [data-plan-index]').forEach(el => {
+    const plan = state.plans[Number(el.dataset.planIndex)];
+    el.classList.toggle('selected', Boolean(plan && plan.path === path));
   });
 }
 
@@ -526,7 +549,7 @@ async function validatePlan() {
       body: JSON.stringify({ plan_path: state.selectedPlan })
     });
     if (res.status === 401) {
-      el.textContent = 'Error: unauthorized — set your token above.';
+      el.textContent = unauthorizedMessage('request');
       el.className = 'output error';
       log('Validate auth required', 'error');
       return;
@@ -568,7 +591,7 @@ async function authorizePlan() {
       })
     });
     if (res.status === 401) {
-      el.textContent = 'Error: unauthorized — set your token above.';
+      el.textContent = unauthorizedMessage('request');
       el.className = 'output error';
       log('Authorize auth required', 'error');
       return;
@@ -626,7 +649,7 @@ async function applyPlan(dryRun) {
       })
     });
     if (res.status === 401) {
-      el.textContent = 'Error: unauthorized — set your token above.';
+      el.textContent = unauthorizedMessage('request');
       el.className = 'output error';
       log('Apply auth required', 'error');
       return;
@@ -649,7 +672,7 @@ async function refreshReceipts() {
   try {
     const res = await fetch(API + '/v1/receipts?limit=20', { headers: getHeaders() });
     if (res.status === 401) {
-      el.innerHTML = 'Error: unauthorized — set your token above.';
+      el.textContent = unauthorizedMessage('list request');
       log('Receipts load auth required', 'error');
       return;
     }
@@ -660,12 +683,19 @@ async function refreshReceipts() {
         el.innerHTML = 'No receipts found.';
         return;
       }
-      el.innerHTML = state.receipts.map(r => `
-        <div class="item" onclick="selectReceipt('${r.path.replace(/\\/g, '\\\\')}')">
-          <div class="item-title">${r.tool || r.action || 'receipt'}</div>
-          <div class="item-meta">${r.id || r.receipt_id || r.path} | status: ${r.status} | ${r.timestamp ? new Date(r.timestamp * 1000).toLocaleString() : ''}</div>
-        </div>
-      `).join('');
+      el.innerHTML = state.receipts.map((r, index) => {
+        const title = escapeHtml(r.tool || r.action || 'receipt');
+        const meta = `${r.id || r.receipt_id || r.path} | status: ${r.status} | ${r.timestamp ? new Date(r.timestamp * 1000).toLocaleString() : ''}`;
+        return `
+          <div class="item" data-receipt-index="${index}">
+            <div class="item-title">${title}</div>
+            <div class="item-meta">${escapeHtml(meta)}</div>
+          </div>
+        `;
+      }).join('');
+      el.querySelectorAll('[data-receipt-index]').forEach((item) => {
+        item.addEventListener('click', () => selectReceipt(state.receipts[Number(item.dataset.receiptIndex)].path));
+      });
       log('Receipts refreshed: ' + state.receipts.length + ' found');
     } else {
       el.innerHTML = 'Failed to load receipts.';
@@ -686,7 +716,7 @@ async function selectReceipt(path) {
     const encoded = encodeURIComponent(path);
     const res = await fetch(API + '/v1/receipts/read?path=' + encoded, { headers: getHeaders() });
     if (res.status === 401) {
-      content.textContent = 'Error: unauthorized — set your token above.';
+      content.textContent = unauthorizedMessage('receipt read request');
       log('Receipt read auth required', 'error');
       return;
     }

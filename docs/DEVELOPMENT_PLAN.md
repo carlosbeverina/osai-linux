@@ -130,16 +130,18 @@ If we build osai-api before core:
 - Changes to core logic require updating both CLI and API
 - The architecture boundary is wrong
 
-### Implementation Order
+### Implementation Status
 
-1. Create `crates/osai-api/src/main.rs` with HTTP server (tokio)
-2. Map endpoints to osai-agent-core functions
-3. Add token-based auth (Bearer / X-OSAI-Token)
-4. Add `/v1/auth/status` endpoint
-5. Add `/ui` static file serving for Dev Panel
-6. Test with curl
-7. Verify MVP loop works via API
-8. Run full test suite
+Phase 2 MVP API is implemented:
+
+1. `crates/osai-api/src/main.rs` provides a loopback-only HTTP server (tokio)
+2. Chat, ask, and apply endpoints call osai-agent-core directly
+3. Token-based auth accepts `Authorization: Bearer` and `X-OSAI-Token`
+4. `/v1/auth/status` reports auth state without revealing token values
+5. `/ui` static file serving provides the prototype Dev Panel
+6. Plan and receipt endpoints enforce path safety for reads/lists
+7. Apply defaults to dry-run and uses ToolBroker/ToolExecutor boundaries through core
+8. Full Rust and Model Router test suites pass in Codex with `PYTHONPATH=src` for Python tests
 
 ### Key Endpoints
 
@@ -174,13 +176,13 @@ GET  /v1/receipts/read
 
 ### Acceptance Criteria
 
-- All proposed endpoints implemented
-- Protected endpoints return 401 without valid token
-- Unauthenticated endpoints work without token
-- Token auth uses constant-time comparison
-- Dev Panel UI loads at `/ui`
-- MVP loop works via API
-- `cargo test --workspace` passes
+- [x] All proposed endpoints implemented
+- [x] Protected endpoints return 401 without valid token
+- [x] Unauthenticated endpoints work without token
+- [x] Token auth uses constant-time comparison
+- [x] Dev Panel UI loads at `/ui`
+- [x] MVP loop works through API endpoints without shelling out to CLI
+- [x] `cargo test --workspace` passes
 
 ## Phase 3: Local Dev UI
 
