@@ -1579,6 +1579,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_ui_keeps_token_in_memory_only() {
+        let result = crate::read_static_file("ui.html").await;
+        assert!(result.is_some(), "ui.html should be readable");
+        let content = String::from_utf8(result.unwrap()).unwrap();
+        assert!(!content.contains("localStorage"));
+        assert!(!content.contains("sessionStorage"));
+    }
+
+    #[tokio::test]
+    async fn test_ui_renders_auth_status_and_escapes_dynamic_html() {
+        let result = crate::read_static_file("ui.html").await;
+        assert!(result.is_some(), "ui.html should be readable");
+        let content = String::from_utf8(result.unwrap()).unwrap();
+        assert!(content.contains("const [health, status, caps, auth]"));
+        assert!(content.contains("Auth required:"));
+        assert!(content.contains("function escapeHtml"));
+        assert!(content.contains("escapeHtml(msg)"));
+    }
+
+    #[tokio::test]
+    async fn test_ui_avoids_inline_dynamic_plan_and_receipt_handlers() {
+        let result = crate::read_static_file("ui.html").await;
+        assert!(result.is_some(), "ui.html should be readable");
+        let content = String::from_utf8(result.unwrap()).unwrap();
+        assert!(!content.contains(r#"onclick="selectPlan("#));
+        assert!(!content.contains(r#"onclick="selectReceipt("#));
+        assert!(content.contains("data-plan-index"));
+        assert!(content.contains("data-receipt-index"));
+    }
+
     // ========================================================================
     // Auth tests
     // ========================================================================

@@ -80,7 +80,7 @@ Phased implementation plan for OSAI. Each phase has clear acceptance criteria. D
 
 **Goal**: Web-based development and control panel (not the final product UI).
 
-**Status**: ⚠️ Prototype exists — Dev Panel UI at `http://127.0.0.1:8090/ui`; final desktop UI not built
+**Status**: ⚠️ Prototype exists — Dev Panel UI at `http://127.0.0.1:8090/ui`; local control-panel flows are implemented and hardened, final desktop UI not built
 
 **Key Features**:
 - Status panel (llama.cpp, Model Router, osai-api health)
@@ -92,6 +92,7 @@ Phased implementation plan for OSAI. Each phase has clear acceptance criteria. D
 - Receipt viewer (list/read receipts)
 - Token input (in-memory only, not localStorage)
 - 401 handling with helpful error messages
+- Escaped dynamic rendering for plan/receipt/status data
 
 **Constraints**:
 - This is a development tool, not the final desktop UI
