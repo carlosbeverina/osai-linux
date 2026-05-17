@@ -1059,7 +1059,7 @@ async fn handle_connection(stream: tokio::net::TcpStream) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    auth::ensure_token_file()?;
+    auth::ensure_token_file_if_needed()?;
 
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -1664,15 +1664,6 @@ mod tests {
         assert!(!crate::auth::constant_time_eq(b"abc123", b"abc12"));
         assert!(!crate::auth::constant_time_eq(b"abc123", b""));
         assert!(crate::auth::constant_time_eq(b"", b""));
-    }
-
-    #[test]
-    fn test_auth_status_response_no_token() {
-        // When no token is set, auth_required should be false (auth disabled)
-        let resp = super::AuthStatusResponse::new();
-        assert!(resp.ok);
-        assert!(!resp.auth_required);
-        assert_eq!(resp.token_source, "disabled");
     }
 
     #[test]

@@ -22,13 +22,20 @@ pub fn token_file_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/osai-api-token"))
 }
 
+fn env_token_is_set() -> bool {
+    std::env::var("OSAI_API_TOKEN")
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false)
+}
+
 /// Get the API token, trying env var first, then the token file.
 /// Returns None if no token is configured.
 pub fn get_token() -> Option<String> {
     // Check env var first.
     if let Ok(env_token) = std::env::var("OSAI_API_TOKEN") {
-        if !env_token.is_empty() {
-            return Some(env_token);
+        let trimmed = env_token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
         }
     }
 
@@ -87,6 +94,18 @@ pub fn ensure_token_file() -> io::Result<()> {
     ensure_token_file_at(&token_file_path())
 }
 
+/// Ensure a token file exists only when no non-empty `OSAI_API_TOKEN` is set.
+///
+/// This is the startup path for osai-api: explicit environment tokens take
+/// precedence and must not cause a local token file to be created.
+pub fn ensure_token_file_if_needed() -> io::Result<()> {
+    if env_token_is_set() {
+        return Ok(());
+    }
+
+    ensure_token_file()
+}
+
 fn ensure_token_file_at(path: &Path) -> io::Result<()> {
     if path.exists() {
         return Ok(());
@@ -122,12 +141,9 @@ impl TokenSource {
 }
 
 /// Describe where the token comes from. This does not create a token file;
-/// startup is responsible for calling `ensure_token_file`.
+/// startup is responsible for calling `ensure_token_file_if_needed`.
 pub fn token_source() -> TokenSource {
-    if std::env::var("OSAI_API_TOKEN")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
+    if env_token_is_set() {
         TokenSource::Env
     } else if token_file_path().exists() {
         TokenSource::File
@@ -184,6 +200,41 @@ impl Default for AuthStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn temp_home() -> PathBuf {
+        std::env::temp_dir().join(format!("osai-api-home-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn with_isolated_home<T>(env_token: Option<&str>, test: impl FnOnce(PathBuf) -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_token = std::env::var_os("OSAI_API_TOKEN");
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+
+        std::env::set_var("HOME", &home);
+        match env_token {
+            Some(token) => std::env::set_var("OSAI_API_TOKEN", token),
+            None => std::env::remove_var("OSAI_API_TOKEN"),
+        }
+
+        let result = test(home.clone());
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_token {
+            Some(value) => std::env::set_var("OSAI_API_TOKEN", value),
+            None => std::env::remove_var("OSAI_API_TOKEN"),
+        }
+        let _ = std::fs::remove_dir_all(home);
+
+        result
+    }
 
     #[test]
     fn test_ensure_token_file_at_creates_restrictive_file() {
@@ -203,5 +254,64 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_ensure_token_file_if_needed_skips_file_when_env_token_set() {
+        with_isolated_home(Some("env-token-value"), |home| {
+            ensure_token_file_if_needed().unwrap();
+
+            let token_path = home.join(".config").join("osai").join("api-token");
+            assert!(
+                !token_path.exists(),
+                "token file should not be created when OSAI_API_TOKEN is set"
+            );
+            assert_eq!(token_source(), TokenSource::Env);
+        });
+    }
+
+    #[test]
+    fn test_ensure_token_file_if_needed_creates_file_when_env_token_unset() {
+        with_isolated_home(None, |home| {
+            ensure_token_file_if_needed().unwrap();
+
+            let token_path = home.join(".config").join("osai").join("api-token");
+            assert!(token_path.exists());
+            let token = std::fs::read_to_string(&token_path).unwrap();
+            assert!(token.trim().len() >= 64);
+            assert_eq!(token_source(), TokenSource::File);
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600);
+            }
+        });
+    }
+
+    #[test]
+    fn test_ensure_token_file_if_needed_creates_file_when_env_token_empty() {
+        with_isolated_home(Some("  	  "), |home| {
+            ensure_token_file_if_needed().unwrap();
+
+            let token_path = home.join(".config").join("osai").join("api-token");
+            assert!(token_path.exists());
+            assert_eq!(token_source(), TokenSource::File);
+        });
+    }
+
+    #[test]
+    fn test_auth_status_reports_env_without_returning_token_value() {
+        let secret = "super-secret-env-token";
+        with_isolated_home(Some(secret), |_| {
+            let resp = AuthStatusResponse::new();
+            assert!(resp.ok);
+            assert!(resp.auth_required);
+            assert_eq!(resp.token_source, "env");
+
+            let json = serde_json::to_string(&resp).unwrap();
+            assert!(!json.contains(secret));
+        });
     }
 }
