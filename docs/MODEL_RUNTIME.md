@@ -129,6 +129,7 @@ Model aliases:
 - `osai-cloud` — Force cloud (MiniMax)
 - `gemma4:e2b` — Gemma 4 E2B
 - `gemma4:e4b` — Gemma 4 E4B
+- `gemma4:12b` — Gemma 4 12B QAT Q4_0 GGUF (target default candidate, pending local validation)
 - `gemma4:26b` — Gemma 4 26B
 - `MiniMax-M2.7` — MiniMax cloud model
 
@@ -193,15 +194,75 @@ Computer use will require additional model capabilities:
 
 ### Hardware Profiles
 
-Future hardware profiles will optimize model selection:
+### Hardware Profiles
 
-| Profile | VRAM | Recommended Models |
-|---------|------|-------------------|
-| Laptop | 8GB | Gemma 4 E2B Q8 |
-| Desktop | 16-24GB | Gemma 4 E4B Q8, Gemma 4 26B Q8 |
-| Server | 80GB+ | vLLM + large models |
+See [HARDWARE_PROFILES_DESIGN.md](HARDWARE_PROFILES_DESIGN.md) for hardware detection, VRAM tiers, profile derivation, and the authoritative recommended-model table. The short version:
 
-Current: Laptop profile is the primary target.
+- CPU-only / <6 GB VRAM: Gemma 4 E2B Q8 GGUF
+- 6-8 GB VRAM: Gemma 4 E2B Q8 GGUF (validated default); Gemma 4 12B QAT Q4_0 with reduced context is opt-in only
+- 8-16 GB VRAM: Gemma 4 12B QAT Q4_0 GGUF (target default candidate, pending local validation)
+- 16-24 GB VRAM: Gemma 4 12B QAT Q4_0 GGUF or Gemma 4 26B A4B QAT Q4_0 GGUF
+- 24-80 GB VRAM: Gemma 4 26B A4B QAT Q4_0 GGUF
+- 80+ GB VRAM (server): Gemma 4 31B QAT Q4_0 GGUF or vLLM with full precision
+
+Validated default: Gemma 4 E2B Q8 GGUF (RTX 4060 Laptop 8GB VRAM). Gemma 4 12B QAT Q4_0 GGUF is a target default candidate for 8GB+ VRAM, not yet locally validated.
+
+## Gemma 4 12B QAT Q4_0 GGUF Evaluation
+
+Google's Gemma 4 family includes E2B, E4B, 12B, 26B A4B, and 31B. The QAT Q4_0 GGUF format is the recommended local llama.cpp / LM Studio format via the suffix `{model-name}-qat-q4_0-gguf`. Official QAT GGUF checkpoints are available for E2B, E4B, 12B, 26B A4B, and 31B.
+
+### Memory Requirements (per Google's Gemma 4 inference memory table)
+
+The table does not include extra VRAM for runtime overhead or KV cache / context. Larger context windows increase memory usage.
+
+| Model | BF16 | Q8_0 | Q4_0 (QAT) |
+|---|---|---|---|
+| Gemma 4 E2B | ~5 GB | ~3 GB | ~2 GB |
+| Gemma 4 E4B | ~8 GB | ~5 GB | ~3 GB |
+| **Gemma 4 12B** | 26.7 GB | 13.4 GB | **6.7 GB** |
+| Gemma 4 26B A4B | 57.7 GB | 28.8 GB | 14.4 GB |
+| Gemma 4 31B | n/a | n/a | ~16 GB |
+
+Source: <https://ai.google.dev/gemma/docs/core>
+
+### File Convention
+
+- File: `gemma-4-12b-it-qat-q4_0.gguf` (Hugging Face repo `google/gemma-4-12B-it-qat-q4_0-gguf`).
+- Approximate file size: 6.98 GB (per Hugging Face model card; the inference memory table lists 6.7 GB for the model weights).
+
+### Hardware Profile Implications
+
+| VRAM Tier | Recommended | Context | Notes |
+|---|---|---|---|
+| <6 GB / CPU-only | E2B Q8 | 4K | Gemma 4 12B not feasible. |
+| 6-8 GB | E2B Q8 (validated default); 12B with reduced context is opt-in only | 4K | 12B Q4_0 with 4K context fits in ~8.2 GB; 8K is ~9.7 GB. |
+| 8-12 GB | **Gemma 4 12B QAT Q4_0 (target default candidate)** | 4K-8K | Pending local validation. |
+| 12-16 GB | **Gemma 4 12B QAT Q4_0 (target default)** | 8K | Recommended default target. |
+| 16-24 GB | 12B Q4_0 or 26B A4B Q4_0 | 8K-16K | Both viable. |
+| 24+ GB | 26B A4B Q4_0 | 16K+ | Performance tier. |
+| 80+ GB (server) | 31B Q4_0 or vLLM with full precision | 16K-32K | Server tier. |
+
+### Validation Requirements
+
+Gemma 4 12B QAT Q4_0 GGUF is a **target default candidate**, not a validated default. It is treated as such until:
+
+1. A real local validation run completes on the target hardware (see `TESTING.md`).
+2. The validation matrix in `HARDWARE_PROFILES_DESIGN.md` is satisfied.
+3. A security review is performed (see `SECURITY_REVIEW_CHECKLIST_DESKTOP_AND_DISTRO.md`).
+4. The promotion is recorded in the catalog with `status: validated_default`.
+
+Until then, **Gemma 4 E2B Q8 GGUF remains the default**. The system ships with E2B as the safe-mode default. The 12B model is the target default for systems that pass local validation.
+
+### Aliases
+
+| Alias | Model | Status |
+|---|---|---|
+| `gemma4:e2b` | Gemma 4 E2B Q8 GGUF | validated_default (fallback / safe mode) |
+| `gemma4:12b` | Gemma 4 12B QAT Q4_0 GGUF | candidate (pending local validation) |
+| `gemma4:26b` | Gemma 4 26B A4B QAT Q4_0 GGUF | experimental |
+| `gemma4:31b` | Gemma 4 31B QAT Q4_0 GGUF | experimental |
+| `default` | resolved by hardware profile | depends on validation |
+| `fallback` | Gemma 4 E2B Q8 GGUF | always available, never demoted |
 
 ## Model Management (Future)
 
