@@ -780,21 +780,26 @@ mod tests {
 
     #[test]
     fn test_default_ask_plans_dir_is_persistent() {
+        // Acquire ENV_LOCK to prevent other tests from modifying HOME.
+        // Then explicitly set HOME to /home/carlos (the real home on this system).
+        // This overrides any temp HOME that might have been set by a concurrent test.
+        let _guard = crate::apply::tests::ENV_LOCK.lock().unwrap();
+        std::env::set_var("HOME", "/home/carlos");
         let plans_dir = default_ask_plans_dir();
         let plans_dir_str = plans_dir.to_string_lossy();
-        // Should not be a temp dir
         assert!(
             !plans_dir_str.contains("tmp"),
-            "default plans dir should not be in tmp"
+            "default plans dir should not be in tmp, got: {}",
+            plans_dir_str
         );
-        // Should be under osai
         assert!(
             plans_dir_str.contains("osai"),
-            "default plans dir should be under osai"
+            "default plans dir should be under osai, got: {}",
+            plans_dir_str
         );
     }
-
     #[test]
+
     fn test_ask_result_serialization() {
         let result = AskResult {
             status: "success".to_string(),

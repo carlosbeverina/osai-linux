@@ -112,10 +112,14 @@ fn is_path_in_allowed_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {
         return true; // No restriction
     }
 
+    // Snapshot HOME once to avoid race when multiple threads call this
+    // while another thread mutates HOME (e.g., in tests using with_test_home).
+    let home_dir: Option<std::path::PathBuf> = std::env::var("HOME").ok().map(PathBuf::from);
+
     let path_str = path.to_string_lossy();
     let expanded_path: PathBuf = if path_str.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            PathBuf::from(home).join(path_str.trim_start_matches("~/"))
+        if let Some(ref home) = home_dir {
+            home.join(path_str.trim_start_matches("~/"))
         } else {
             path.to_path_buf()
         }
@@ -131,8 +135,8 @@ fn is_path_in_allowed_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {
     for root in allowed_roots {
         let root_str = root.to_string_lossy();
         let expanded_root: PathBuf = if root_str.starts_with("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                PathBuf::from(home).join(root_str.trim_start_matches("~/"))
+            if let Some(ref home) = home_dir {
+                home.join(root_str.trim_start_matches("~/"))
             } else {
                 root.clone()
             }
@@ -852,12 +856,12 @@ pub fn print_apply_output(output: &ApplyCoreOutput, json: bool) {
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::Path;
     use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("osai-core-{}-{}", name, uuid::Uuid::new_v4()));
@@ -865,14 +869,14 @@ mod tests {
         dir
     }
 
-    fn with_test_home<T>(test: impl FnOnce(PathBuf) -> T) -> T {
+    fn with_test_home<T>(test: impl FnOnce(std::sync::MutexGuard<'_, ()>, PathBuf) -> T) -> T {
         let _guard = ENV_LOCK.lock().unwrap();
         let old_home = std::env::var_os("HOME");
         let home = unique_test_dir("home");
         std::fs::create_dir_all(home.join("Downloads")).unwrap();
         std::env::set_var("HOME", &home);
 
-        let result = test(home.clone());
+        let result = test(_guard, home.clone());
 
         match old_home {
             Some(value) => std::env::set_var("HOME", value),
@@ -994,7 +998,7 @@ shell_requires_sandbox: true"#,
 
     #[test]
     fn test_is_path_in_allowed_roots_expands_tilde() {
-        with_test_home(|home| {
+        let _home = with_test_home(|_guard, home| {
             // ~/Downloads with absolute allowed root
             let path = PathBuf::from("~/Downloads");
             let allowed = vec![home.join("Downloads")];
@@ -1002,13 +1006,16 @@ shell_requires_sandbox: true"#,
                 is_path_in_allowed_roots(&path, &allowed),
                 "~/Downloads should be allowed when $HOME/Downloads is allowed"
             );
+            home
         });
     }
 
     #[test]
     fn test_is_path_in_allowed_roots_tilde_in_allowed_root() {
-        // ~/Downloads with tilde in allowed root
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "NONE".to_string());
         let path = PathBuf::from("~/Downloads");
+        let expanded = PathBuf::from(&home).join("Downloads");
         let allowed = vec![PathBuf::from("~/Downloads")];
         assert!(
             is_path_in_allowed_roots(&path, &allowed),
@@ -1018,7 +1025,7 @@ shell_requires_sandbox: true"#,
 
     #[test]
     fn test_is_path_in_allowed_roots_denies_etc() {
-        with_test_home(|home| {
+        let _home = with_test_home(|_guard, home| {
             let outside = unique_test_dir("outside");
             let allowed = vec![home.join("Downloads")];
             assert!(
@@ -1026,12 +1033,13 @@ shell_requires_sandbox: true"#,
                 "outside path should be denied when only $HOME/Downloads is allowed"
             );
             let _ = std::fs::remove_dir_all(outside);
+            home
         });
     }
 
     #[test]
     fn test_is_path_in_allowed_roots_dotdot_does_not_bypass() {
-        with_test_home(|home| {
+        let _home = with_test_home(|_guard, home| {
             // ~/Downloads/.. should not bypass to home
             let path = PathBuf::from("~/Downloads/..");
             let allowed = vec![home.join("Downloads")];
